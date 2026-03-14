@@ -595,7 +595,7 @@ namespace TimeSyncTool
             UpdateButton(false);
 
             logTextBox.Clear();
-            logTextBox.AppendText("PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.26.3.14\n");
+            logTextBox.AppendText("PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.26.3.14.1\n");
             logTextBox.AppendText(new string('-', 50) + "\n");
 
             syncThread = new Thread(new ThreadStart(() =>
@@ -606,7 +606,7 @@ namespace TimeSyncTool
                     UpdateStatus("正在初始化...", Color.Yellow);
                     UpdateProgressBar(true);
 
-                    AddLog("PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.26.3.14\n", Color.DarkBlue);
+                    AddLog("PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.26.3.14.1\n", Color.DarkBlue);
                     AddLog($"可用时间服务器: {NtpServers.Length} 个\n", Color.DarkBlue);
                     AddLog(new string('-', 50) + "\n", Color.DarkGray);
 
