@@ -10,6 +10,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
+using WindowsFormsApp1;
 
 namespace TimeSyncTool
 {
@@ -206,6 +207,26 @@ namespace TimeSyncTool
             try
             {
                 WriteLog("构造函数开始");
+
+                // 订阅更新检测事件，用于显示气泡提示
+                Program.UpdateDetected += (version, message) =>
+                {
+                    if (trayIcon != null && !this.IsDisposed)
+                    {
+                        // 确保在 UI 线程上操作
+                        if (this.InvokeRequired)
+                        {
+                            this.Invoke(new MethodInvoker(() =>
+                            {
+                                trayIcon.ShowBalloonTip(5000, "软件更新", $"Yeah, 检测到新版本 {version}，{message}", ToolTipIcon.Info);
+                            }));
+                        }
+                        else
+                        {
+                            trayIcon.ShowBalloonTip(5000, "软件更新", $"Yeah, 检测到新版本 {version}，{message}", ToolTipIcon.Info);
+                        }
+                    }
+                };
                 LoadSettings();
                 SetupForm();
                 InitializeTrayIcon();
@@ -243,7 +264,7 @@ namespace TimeSyncTool
             fileMenu.DropDownItems.Add(exitItem);
 
             ToolStripMenuItem viewMenu = new ToolStripMenuItem("视图(&V)");
-            ToolStripMenuItem showLogItem = new ToolStripMenuItem("显示日志(&L)");
+            ToolStripMenuItem showLogItem = new ToolStripMenuItem("打开日志(&L)");
             // 修改：点击后打开日志文件夹
             showLogItem.Click += (s, e) => OpenLogFolder();
             viewMenu.DropDownItems.Add(showLogItem);
@@ -256,7 +277,7 @@ namespace TimeSyncTool
 
             statusLabel = new Label
             {
-                Text = "正在启动系统优化...",
+                Text = "陈叔叔正在启动系统优化...",
                 Location = new Point(10, 30),
                 Size = new Size(760, 25),
                 Font = new Font("Microsoft YaHei", 12, FontStyle.Bold),
@@ -432,8 +453,8 @@ namespace TimeSyncTool
         {
             if (isSyncing)
             {
-                DialogResult result = MessageBox.Show("同步正在进行中，确定要强制退出吗？",
-                    "确认强制退出", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                DialogResult result = MessageBox.Show("同步正在进行中，宁真的要强制退出吗？",
+                    "Yes, Sir!", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
 
                 if (result == DialogResult.Yes)
                 {
@@ -502,28 +523,33 @@ namespace TimeSyncTool
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
-            if (forceExit || isPermissionError)
+            // 如果是强制退出、权限错误，或者同步已完成，则直接清理托盘图标并退出
+            if (forceExit || isPermissionError || syncCompleted)
             {
                 if (trayIcon != null)
                 {
-                    trayIcon.Visible = false;
-                    trayIcon.Dispose();
+                    try
+                    {
+                        trayIcon.Visible = false;
+                        trayIcon.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        WriteLog($"清理托盘图标时出错：{ex.Message}");
+                    }
+                    finally
+                    {
+                        trayIcon = null;
+                    }
                 }
                 return;
             }
 
+            // 同步未完成：取消关闭，隐藏到托盘
             if (!syncCompleted)
             {
                 e.Cancel = true;
                 MinimizeToTray();
-            }
-            else
-            {
-                if (trayIcon != null)
-                {
-                    trayIcon.Visible = false;
-                    trayIcon.Dispose();
-                }
             }
         }
 
@@ -568,7 +594,7 @@ namespace TimeSyncTool
 
         private void ExitProgram()
         {
-            DialogResult result = MessageBox.Show("确定要退出系统优化工具吗？",
+            DialogResult result = MessageBox.Show("宁确定要退出系统优化工具吗？",
                 "确认退出", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
 
             if (result == DialogResult.Yes)
@@ -595,7 +621,7 @@ namespace TimeSyncTool
             UpdateButton(false);
 
             logTextBox.Clear();
-            logTextBox.AppendText("PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.26.3.14.1\n");
+            logTextBox.AppendText("PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.26.3.14\n");
             logTextBox.AppendText(new string('-', 50) + "\n");
 
             syncThread = new Thread(new ThreadStart(() =>
@@ -606,7 +632,7 @@ namespace TimeSyncTool
                     UpdateStatus("正在初始化...", Color.Yellow);
                     UpdateProgressBar(true);
 
-                    AddLog("PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.26.3.14.1\n", Color.DarkBlue);
+                    AddLog("PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.26.3.14\n", Color.DarkBlue);
                     AddLog($"可用时间服务器: {NtpServers.Length} 个\n", Color.DarkBlue);
                     AddLog(new string('-', 50) + "\n", Color.DarkGray);
 
@@ -722,14 +748,56 @@ namespace TimeSyncTool
                         WriteLog("时间同步成功");
                         UpdateStatus("时间同步成功！", Color.Green);
                         AddLog("√ 时间同步成功！\n", Color.Green);
-                        AddLog($"\n和时间的同步率达到100%！程序将在 {SUCCESS_DELAY_MS / 1000} 秒后自动关闭...\n", Color.DarkGreen);
+                        AddLog($"\n和时间的同步率达到100%！程序将隐藏到托盘继续检查更新，完成后自动退出。\n", Color.DarkGreen);
 
                         if (trayIcon != null)
-                            trayIcon.ShowBalloonTip(3000, "时间同步完成", "系统时间已成功同步！", ToolTipIcon.Info);
+                            trayIcon.ShowBalloonTip(3000, "时间同步完成", "系统时间已成功同步！后台更新检测中...", ToolTipIcon.Info);
 
-                        Thread.Sleep(SUCCESS_DELAY_MS);
-                        syncCompleted = true;
-                        this.Invoke(new MethodInvoker(this.Close));
+                        // 等待一小段时间让用户看到提示，然后隐藏窗口到托盘
+                        Thread.Sleep(2000);
+                        this.Invoke(new MethodInvoker(() => MinimizeToTray()));
+
+                        // 在 UI 线程上创建定时器，监控更新检查状态
+                        this.Invoke(new MethodInvoker(() =>
+                        {
+                            System.Windows.Forms.Timer updateCheckTimer = new System.Windows.Forms.Timer();
+                            updateCheckTimer.Interval = 1000;
+                            updateCheckTimer.Tick += (s, args) =>
+                            {
+                                if (Program.UpdateCheckCompleted)
+                                {
+                                    updateCheckTimer.Stop();
+                                    try
+                                    {
+                                        if (trayIcon != null)
+                                        {
+                                            try
+                                            {
+                                                trayIcon.Visible = false;
+                                                trayIcon.Dispose();
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                WriteLog($"退出时清理托盘图标出错：{ex.Message}");
+                                            }
+                                            finally
+                                            {
+                                                trayIcon = null;
+                                            }
+                                        }
+                                        Application.Exit(); // 直接退出，不再触发 FormClosing 的隐藏
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        WriteLog($"退出过程中发生异常：{ex.Message}");
+                                        Environment.Exit(1);
+                                    }
+                                }
+                            };
+                            updateCheckTimer.Start();
+                        }));
+
+                        // 注意：不设置 syncCompleted = true，程序继续运行
                     }
                     else if (adminPermissionError)
                     {

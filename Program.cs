@@ -5,8 +5,8 @@ using System.Net;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
 using System.Web.Script.Serialization;
+using System.Windows.Forms;
 using TimeSyncTool;
 
 namespace WindowsFormsApp1
@@ -24,12 +24,18 @@ namespace WindowsFormsApp1
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "TimeSyncTool", "updates");
 
+        // 更新完成标志
+        public static bool UpdateCheckCompleted = false;
+
+        // 更新检测事件（用于通知 TimeSyncForm 显示气泡）
+        public static event Action<string, string> UpdateDetected;
+
         [STAThread]
         static void Main()
         {
             try
             {
-                // 检查是否有待应用的更新（更新后重启）
+                // 检查是否有待应用的更新（更新后重启）- 只处理不弹窗
                 HandlePendingUpdate();
 
                 // 异步检查新版本（不阻塞主线程）
@@ -111,7 +117,7 @@ namespace WindowsFormsApp1
         }
 
         /// <summary>
-        /// 检查是否有待应用的更新（更新后重启）
+        /// 检查是否有待应用的更新（更新后重启）- 静默处理，不弹窗
         /// </summary>
         private static void HandlePendingUpdate()
         {
@@ -127,13 +133,10 @@ namespace WindowsFormsApp1
 
                     if (File.Exists(newVersionPath))
                     {
-                        File.Copy(newVersionPath, currentExe, true);
-                        File.Delete(newVersionPath);
+                        // 注意：这里不替换文件，因为已经在更新脚本中完成了
+                        // 只清理标志文件
                         File.Delete(pendingFile);
-
-                        WriteLog("更新文件已应用");
-                        MessageBox.Show("更新完成！", "提示",
-                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        WriteLog("更新标志已清除");
                     }
                 }
             }
@@ -150,6 +153,10 @@ namespace WindowsFormsApp1
         {
             try
             {
+                // 强制使用 TLS 1.2（解决 Windows 7 的 SSL 错误）
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+                ServicePointManager.ServerCertificateValidationCallback = delegate { return true; };
+
                 WriteLog("开始后台检查更新...");
 
                 Version currentVersion = Assembly.GetExecutingAssembly().GetName().Version;
@@ -163,11 +170,9 @@ namespace WindowsFormsApp1
                     client.Headers.Add("User-Agent", GITHUB_USER_AGENT);
                     client.Headers.Add("Accept", "application/vnd.github.v3+json");
 
-                    // 异步下载，不阻塞主线程
                     string jsonResponse = await client.DownloadStringTaskAsync(GITHUB_API);
                     WriteLog("GitHub API 响应成功");
 
-                    // 使用 JavaScriptSerializer 解析 JSON
                     var serializer = new JavaScriptSerializer();
                     var releaseInfo = serializer.Deserialize<dynamic>(jsonResponse);
 
@@ -179,35 +184,20 @@ namespace WindowsFormsApp1
 
                     if (latestVersion.CompareTo(currentVersion) > 0)
                     {
-                        WriteLog("发现新版本，准备询问用户");
-                        string releaseNotes = releaseInfo["body"] ?? "无更新说明";
+                        WriteLog("发现新版本，准备自动更新");
 
-                        // 需要在 UI 线程上显示对话框
-                        bool shouldUpdate = false;
-                        await Task.Run(() =>
+                        // 触发事件显示气泡提示
+                        UpdateDetected?.Invoke(latestVersion.ToString(), "正在自动更新...");
+
+                        var assets = releaseInfo["assets"] as object[];
+                        if (assets != null && assets.Length > 0)
                         {
-                            shouldUpdate = MessageBox.Show(
-                                $"发现新版本 {latestVersion}\n当前版本 {currentVersion}\n\n" +
-                                $"更新内容：\n{releaseNotes}\n\n" +
-                                "是否立即下载更新？",
-                                "软件更新",
-                                MessageBoxButtons.YesNo,
-                                MessageBoxIcon.Question
-                            ) == DialogResult.Yes;
-                        });
+                            dynamic firstAsset = assets[0];
+                            string downloadUrl = firstAsset["browser_download_url"];
+                            string fileName = firstAsset["name"];
 
-                        if (shouldUpdate)
-                        {
-                            var assets = releaseInfo["assets"] as object[];
-                            if (assets != null && assets.Length > 0)
-                            {
-                                dynamic firstAsset = assets[0];
-                                string downloadUrl = firstAsset["browser_download_url"];
-                                string fileName = firstAsset["name"];
-
-                                WriteLog($"下载地址: {downloadUrl}");
-                                await DownloadUpdateAsync(downloadUrl, fileName, latestVersion);
-                            }
+                            WriteLog($"下载地址: {downloadUrl}");
+                            await DownloadUpdateAsync(downloadUrl, fileName, latestVersion);
                         }
                     }
                     else
@@ -220,10 +210,15 @@ namespace WindowsFormsApp1
             {
                 WriteLog($"后台检查更新失败：{ex.Message}");
             }
+            finally
+            {
+                UpdateCheckCompleted = true;
+                WriteLog("更新检查完成");
+            }
         }
 
         /// <summary>
-        /// 异步下载更新文件
+        /// 异步下载更新文件（静默更新，不重启程序）
         /// </summary>
         private static async Task DownloadUpdateAsync(string downloadUrl, string fileName, Version newVersion)
         {
@@ -247,12 +242,11 @@ namespace WindowsFormsApp1
                         catch { }
                     };
 
-                    // 异步下载
                     await client.DownloadFileTaskAsync(new Uri(downloadUrl), downloadedFile);
 
                     WriteLog("下载完成，准备更新脚本");
                     CreateUpdateScript(updaterScript, currentExe, downloadedFile, newVersion);
-                    WriteLog("更新脚本创建成功，准备重启应用");
+                    WriteLog("更新脚本创建成功，准备退出主程序，由更新脚本完成后台替换");
 
                     Process.Start(new ProcessStartInfo()
                     {
@@ -262,25 +256,28 @@ namespace WindowsFormsApp1
                         WindowStyle = ProcessWindowStyle.Hidden
                     });
 
+                    // 退出当前程序，让更新脚本替换文件
                     Environment.Exit(0);
                 }
             }
             catch (Exception ex)
             {
                 WriteLog($"下载过程出错: {ex.Message}");
-                MessageBox.Show($"下载更新出错：{ex.Message}", "错误",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                // 出错时不打扰用户，仅记录日志
             }
         }
 
+        /// <summary>
+        /// 创建更新脚本（批处理文件）- 静默更新，不提示不重启
+        /// </summary>
         private static void CreateUpdateScript(string scriptPath, string currentExe, string newExe, Version newVersion)
         {
             string pendingFile = Path.Combine(UPDATE_DIR, "pending.txt");
             File.WriteAllText(pendingFile, newExe);
 
+            // 生成批处理内容：静默替换文件，不显示任何提示
             string batchContent = $@"@echo off
 title 正在更新软件...
-echo 正在更新，请稍候...
 
 :: 等待主程序完全退出
 timeout /t 2 /nobreak > nul
@@ -293,7 +290,6 @@ timeout /t 1 /nobreak > nul
 if exist ""{currentExe}"" (
     del /f /q ""{currentExe}""
     if errorlevel 1 (
-        echo 文件被占用，等待重试...
         timeout /t 2 /nobreak > nul
         goto retry
     )
@@ -301,9 +297,6 @@ if exist ""{currentExe}"" (
 
 :: 复制新文件
 copy /y ""{newExe}"" ""{currentExe}""
-
-:: 启动新版本
-start """" ""{currentExe}""
 
 :: 清理临时文件
 del /f /q ""{newExe}"" 2>nul
