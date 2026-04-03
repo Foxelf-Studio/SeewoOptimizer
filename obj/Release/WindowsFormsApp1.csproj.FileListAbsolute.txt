@@ -1,5 +1,4 @@
 C:\Users\theti\source\repos\WindowsFormsApp1\WindowsFormsApp1\obj\Release\WindowsFormsApp1.csproj.AssemblyReference.cache
-C:\Users\theti\source\repos\WindowsFormsApp1\WindowsFormsApp1\obj\Release\WindowsFormsApp1.Properties.Resources.resources
 C:\Users\theti\source\repos\WindowsFormsApp1\WindowsFormsApp1\obj\Release\TimeSyncTool.TimeSyncForm.resources
 C:\Users\theti\source\repos\WindowsFormsApp1\WindowsFormsApp1\obj\Release\TimeSyncTool.SettingsForm.resources
 C:\Users\theti\source\repos\WindowsFormsApp1\WindowsFormsApp1\obj\Release\WindowsFormsApp1.csproj.GenerateResource.cache
@@ -41,3 +40,4 @@ C:\Users\theti\source\repos\WindowsFormsApp1\WindowsFormsApp1\bin\Release\System
 C:\Users\theti\source\repos\WindowsFormsApp1\WindowsFormsApp1\bin\Release\System.Text.Encodings.Web.xml
 C:\Users\theti\source\repos\WindowsFormsApp1\WindowsFormsApp1\bin\Release\System.Text.Json.xml
 C:\Users\theti\source\repos\WindowsFormsApp1\WindowsFormsApp1\bin\Release\System.Threading.Tasks.Extensions.xml
+C:\Users\theti\source\repos\WindowsFormsApp1\WindowsFormsApp1\obj\Release\SeewoOpt.Properties.Resources.resources

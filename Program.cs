@@ -3,9 +3,10 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Reflection;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using TimeSyncTool;
 
@@ -30,6 +31,12 @@ namespace WindowsFormsApp1
         // 更新检测事件（用于通知 TimeSyncForm 显示气泡）
         public static event Action<string, string> UpdateDetected;
 
+        // 缓存更新信息，防止事件错过
+        public static Tuple<string, string> PendingUpdateInfo { get; set; }
+
+        // 互斥体对象
+        private static Mutex singleInstanceMutex;
+
         [STAThread]
         static void Main()
         {
@@ -38,12 +45,33 @@ namespace WindowsFormsApp1
                 // 检查是否有待应用的更新（更新后重启）- 只处理不弹窗
                 HandlePendingUpdate();
 
-                // 异步检查新版本（不阻塞主线程）
-                Task.Run(() => CheckForUpdatesAsync());
+                // 检查是否已有实例在运行
+                if (!IsSingleInstance())
+                {
+                    WriteLog("已有实例运行，退出");
+                    MessageBox.Show("程序已在运行中。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
 
-                // 原有的启动代码
+                // 程序集解析事件（必须在加载任何外部程序集前注册）
                 AppDomain.CurrentDomain.AssemblyResolve += CurrentDomain_AssemblyResolve;
+
+                // 确保必需的 DLL 存在（必须在异步更新检查之前，否则 Newtonsoft.Json 缺失）
                 EnsureRequiredDllsExist();
+
+                // 异步检查新版本（不阻塞主线程）
+                Task.Run(() => CheckForUpdatesAsync()).ContinueWith(t =>
+                {
+                    if (t.IsFaulted)
+                    {
+                        WriteLog($"更新检查任务异常: {t.Exception?.Message}");
+                        WriteLog($"异常详情: {t.Exception}");
+                    }
+                    else
+                    {
+                        WriteLog("更新检查任务正常完成");
+                    }
+                });
 
                 WriteLog("========================================");
                 WriteLog($"程序启动 - 时间: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
@@ -55,51 +83,40 @@ namespace WindowsFormsApp1
                 WriteLog($"当前版本: {Assembly.GetExecutingAssembly().GetName().Version}");
                 WriteLog($"========================================");
 
-                bool createdNew;
-                using (new Mutex(true, "TimeSyncTool_UniqueMutex", out createdNew))
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+
+                Application.ThreadException += (sender, e) =>
                 {
-                    if (!createdNew)
-                    {
-                        WriteLog("已有实例运行，退出");
-                        MessageBox.Show("程序已在运行中。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        return;
-                    }
+                    WriteLog($"========== 线程异常 ==========");
+                    WriteLog($"异常消息: {e.Exception.Message}");
+                    WriteLog($"异常堆栈: {e.Exception.StackTrace}");
+                    MessageBox.Show($"发生未处理的异常：{e.Exception.Message}\n\n程序将关闭。",
+                        "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                };
 
-                    Application.EnableVisualStyles();
-                    Application.SetCompatibleTextRenderingDefault(false);
+                AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
+                {
+                    Exception ex = e.ExceptionObject as Exception;
+                    WriteLog($"========== 致命异常 ==========");
+                    WriteLog($"异常消息: {ex?.Message ?? "未知错误"}");
+                    WriteLog($"异常堆栈: {ex?.StackTrace ?? ""}");
+                    MessageBox.Show($"发生致命错误：{ex?.Message ?? "未知错误"}\n\n程序将关闭。",
+                        "致命错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                };
 
-                    Application.ThreadException += (sender, e) =>
-                    {
-                        WriteLog($"========== 线程异常 ==========");
-                        WriteLog($"异常消息: {e.Exception.Message}");
-                        WriteLog($"异常堆栈: {e.Exception.StackTrace}");
-                        MessageBox.Show($"发生未处理的异常：{e.Exception.Message}\n\n程序将关闭。",
-                            "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    };
-
-                    AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
-                    {
-                        Exception ex = e.ExceptionObject as Exception;
-                        WriteLog($"========== 致命异常 ==========");
-                        WriteLog($"异常消息: {ex?.Message ?? "未知错误"}");
-                        WriteLog($"异常堆栈: {ex?.StackTrace ?? ""}");
-                        MessageBox.Show($"发生致命错误：{ex?.Message ?? "未知错误"}\n\n程序将关闭。",
-                            "致命错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    };
-
-                    try
-                    {
-                        WriteLog("开始运行主窗体");
-                        Application.Run(new TimeSyncForm());
-                        WriteLog("主窗体运行结束");
-                    }
-                    catch (Exception ex)
-                    {
-                        WriteLog($"========== Run 异常 ==========");
-                        WriteLog($"异常消息: {ex.Message}");
-                        MessageBox.Show($"程序运行错误：{ex.Message}", "错误",
-                            MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
+                try
+                {
+                    WriteLog("开始运行主窗体");
+                    Application.Run(new TimeSyncForm());
+                    WriteLog("主窗体运行结束");
+                }
+                catch (Exception ex)
+                {
+                    WriteLog($"========== Run 异常 ==========");
+                    WriteLog($"异常消息: {ex.Message}");
+                    MessageBox.Show($"程序运行错误：{ex.Message}", "错误",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
 
                 WriteLog("程序正常退出");
@@ -113,6 +130,50 @@ namespace WindowsFormsApp1
                 WriteLog($"异常堆栈: {ex.StackTrace}");
                 MessageBox.Show($"程序启动时发生致命错误：{ex.Message}\n\n程序将关闭。",
                     "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                // 释放互斥体
+                ReleaseMutex();
+            }
+        }
+
+        /// <summary>
+        /// 检查是否只有一个实例在运行
+        /// </summary>
+        private static bool IsSingleInstance()
+        {
+            try
+            {
+                // 尝试创建互斥体
+                singleInstanceMutex = new Mutex(true, "TimeSyncTool_UniqueMutex", out bool createdNew);
+                return createdNew;
+            }
+            catch (Exception ex)
+            {
+                WriteLog($"检查实例时出错：{ex.Message}");
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// 释放互斥体
+        /// </summary>
+        private static void ReleaseMutex()
+        {
+            try
+            {
+                if (singleInstanceMutex != null)
+                {
+                    singleInstanceMutex.ReleaseMutex();
+                    singleInstanceMutex.Close();
+                    singleInstanceMutex = null;
+                    WriteLog("互斥体已释放");
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteLog($"释放互斥体时出错：{ex.Message}");
             }
         }
 
@@ -147,13 +208,14 @@ namespace WindowsFormsApp1
         }
 
         /// <summary>
-        /// 异步检查 GitHub 上的新版本
+        /// 异步检查 GitHub 上的新版本（使用正则提取，避免 JSON 解析错误）
         /// </summary>
         private static async Task CheckForUpdatesAsync()
         {
+            WriteLog("进入 CheckForUpdatesAsync 方法");
             try
             {
-                // 强制使用 TLS 1.2（解决 Windows 7 的 SSL 错误）
+                // 强制使用 TLS 1.2
                 ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
                 ServicePointManager.ServerCertificateValidationCallback = delegate { return true; };
 
@@ -169,14 +231,45 @@ namespace WindowsFormsApp1
                 {
                     client.Headers.Add("User-Agent", GITHUB_USER_AGENT);
                     client.Headers.Add("Accept", "application/vnd.github.v3+json");
+                    client.Encoding = Encoding.UTF8;
 
                     string jsonResponse = await client.DownloadStringTaskAsync(GITHUB_API);
                     WriteLog("GitHub API 响应成功");
+                    WriteLog($"响应内容长度: {jsonResponse.Length}");
 
-                    var serializer = new JavaScriptSerializer();
-                    var releaseInfo = serializer.Deserialize<dynamic>(jsonResponse);
+                    // 提取 tag_name
+                    string tagName = null;
+                    string downloadUrl = null;
 
-                    string tagName = releaseInfo["tag_name"];
+                    Match tagMatch = Regex.Match(jsonResponse, @"""tag_name""\s*:\s*""([^""]+)""");
+                    if (tagMatch.Success)
+                    {
+                        tagName = tagMatch.Groups[1].Value;
+                        WriteLog($"提取到 tag_name: {tagName}");
+                    }
+                    else
+                    {
+                        WriteLog("未找到 tag_name");
+                        return;
+                    }
+
+                    // 提取第一个 assets 中的 browser_download_url
+                    Match urlMatch = Regex.Match(jsonResponse, @"""browser_download_url""\s*:\s*""([^""]+)""");
+                    if (urlMatch.Success)
+                    {
+                        downloadUrl = urlMatch.Groups[1].Value;
+                        WriteLog($"提取到下载地址: {downloadUrl}");
+                    }
+                    else
+                    {
+                        WriteLog("未找到 browser_download_url");
+                        return;
+                    }
+
+                    // 从 URL 中提取文件名（更可靠）
+                    string fileName = Path.GetFileName(new Uri(downloadUrl).LocalPath);
+                    WriteLog($"提取到文件名: {fileName}");
+
                     string versionStr = tagName.TrimStart('v');
                     Version latestVersion = new Version(versionStr);
 
@@ -186,19 +279,12 @@ namespace WindowsFormsApp1
                     {
                         WriteLog("发现新版本，准备自动更新");
 
-                        // 触发事件显示气泡提示
+                        // 缓存更新信息
+                        PendingUpdateInfo = Tuple.Create(latestVersion.ToString(), "正在自动更新...");
                         UpdateDetected?.Invoke(latestVersion.ToString(), "正在自动更新...");
 
-                        var assets = releaseInfo["assets"] as object[];
-                        if (assets != null && assets.Length > 0)
-                        {
-                            dynamic firstAsset = assets[0];
-                            string downloadUrl = firstAsset["browser_download_url"];
-                            string fileName = firstAsset["name"];
-
-                            WriteLog($"下载地址: {downloadUrl}");
-                            await DownloadUpdateAsync(downloadUrl, fileName, latestVersion);
-                        }
+                        // 带重试的下载
+                        await DownloadUpdateWithRetryAsync(downloadUrl, fileName, latestVersion);
                     }
                     else
                     {
@@ -209,6 +295,7 @@ namespace WindowsFormsApp1
             catch (Exception ex)
             {
                 WriteLog($"后台检查更新失败：{ex.Message}");
+                WriteLog($"异常详情：{ex}");
             }
             finally
             {
@@ -218,20 +305,57 @@ namespace WindowsFormsApp1
         }
 
         /// <summary>
-        /// 异步下载更新文件（静默更新，不重启程序）
+        /// 带重试机制的下载更新文件
+        /// </summary>
+        private static async Task<bool> DownloadUpdateWithRetryAsync(string downloadUrl, string fileName, Version newVersion)
+        {
+            const int maxRetries = 3;
+            const int retryDelayMs = 2000;
+
+            for (int retry = 0; retry < maxRetries; retry++)
+            {
+                try
+                {
+                    await DownloadUpdateAsync(downloadUrl, fileName, newVersion);
+                    return true; // 成功
+                }
+                catch (Exception ex)
+                {
+                    WriteLog($"下载失败 (尝试 {retry + 1}/{maxRetries}): {ex.Message}");
+                    if (retry == maxRetries - 1)
+                    {
+                        WriteLog($"下载最终失败，无法更新");
+                        return false;
+                    }
+                    else
+                    {
+                        WriteLog($"等待 {retryDelayMs}ms 后重试...");
+                        await Task.Delay(retryDelayMs);
+                    }
+                }
+            }
+            return false;
+        }
+
+       
+        /// <summary>
+        /// 异步下载更新文件（内部不捕获异常，由重试方法处理）
         /// </summary>
         private static async Task DownloadUpdateAsync(string downloadUrl, string fileName, Version newVersion)
         {
-            try
+            string downloadedFile = Path.Combine(UPDATE_DIR, fileName);
+            string currentExe = Application.ExecutablePath;
+            string updaterScript = Path.Combine(UPDATE_DIR, "update.bat");
+
+            WriteLog("开始下载更新文件...");
+
+            using (WebClient client = new WebClient())
             {
-                string downloadedFile = Path.Combine(UPDATE_DIR, fileName);
-                string currentExe = Application.ExecutablePath;
-                string updaterScript = Path.Combine(UPDATE_DIR, "update.bat");
-
-                WriteLog("开始下载更新文件...");
-
-                using (WebClient client = new WebClient())
+                // 使用 CancellationTokenSource 实现超时
+                using (var cts = new CancellationTokenSource())
                 {
+                    cts.CancelAfter(TimeSpan.FromSeconds(30)); // 30秒超时
+
                     client.DownloadProgressChanged += (s, e) =>
                     {
                         try
@@ -242,29 +366,36 @@ namespace WindowsFormsApp1
                         catch { }
                     };
 
-                    await client.DownloadFileTaskAsync(new Uri(downloadUrl), downloadedFile);
+                    var downloadTask = client.DownloadFileTaskAsync(new Uri(downloadUrl), downloadedFile);
+                    var completedTask = await Task.WhenAny(downloadTask, Task.Delay(-1, cts.Token));
 
-                    WriteLog("下载完成，准备更新脚本");
-                    CreateUpdateScript(updaterScript, currentExe, downloadedFile, newVersion);
-                    WriteLog("更新脚本创建成功，准备退出主程序，由更新脚本完成后台替换");
-
-                    Process.Start(new ProcessStartInfo()
+                    if (completedTask != downloadTask)
                     {
-                        FileName = updaterScript,
-                        UseShellExecute = true,
-                        CreateNoWindow = true,
-                        WindowStyle = ProcessWindowStyle.Hidden
-                    });
+                        // 超时
+                        client.CancelAsync();
+                        throw new TimeoutException("下载超时（30秒）");
+                    }
 
-                    // 退出当前程序，让更新脚本替换文件
-                    Environment.Exit(0);
+                    await downloadTask; // 重新抛出可能的异常
                 }
             }
-            catch (Exception ex)
+
+            WriteLog("下载完成，准备更新脚本");
+            CreateUpdateScript(updaterScript, currentExe, downloadedFile, newVersion);
+            WriteLog("更新脚本创建成功，准备退出主程序，由更新脚本完成后台替换");
+
+            // 先释放互斥体，再启动更新脚本
+
+            Process.Start(new ProcessStartInfo()
             {
-                WriteLog($"下载过程出错: {ex.Message}");
-                // 出错时不打扰用户，仅记录日志
-            }
+                FileName = updaterScript,
+                UseShellExecute = true,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            });
+
+            // 退出当前程序，让更新脚本替换文件
+            Environment.Exit(0);
         }
 
         /// <summary>
@@ -357,39 +488,39 @@ exit
                 try
                 {
                     WriteLog($"正在提取DLL：{dllName}");
-                    string resourceName = $"WindowsFormsApp1.{dllName}";
-                    using (Stream resourceStream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName))
+                    // 尝试多种资源名
+                    string[] possibleResourceNames = {
+                $"WindowsFormsApp1.{dllName}",
+                $"WindowsFormsApp1.Resources.{dllName}"
+            };
+                    Stream resourceStream = null;
+                    foreach (var resName in possibleResourceNames)
                     {
-                        if (resourceStream == null)
-                        {
-                            resourceName = dllName;
-                            using (var fallbackStream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName))
-                            {
-                                if (fallbackStream == null)
-                                {
-                                    WriteLog($"错误：找不到嵌入式资源 {dllName}");
-                                    WriteLog("可用的资源列表：");
-                                    foreach (string res in Assembly.GetExecutingAssembly().GetManifestResourceNames())
-                                        WriteLog($"  - {res}");
-                                    continue;
-                                }
-                                using (FileStream fileStream = new FileStream(dllPath, FileMode.Create, FileAccess.Write))
-                                    fallbackStream.CopyTo(fileStream);
-                            }
-                        }
-                        else
-                        {
-                            using (FileStream fileStream = new FileStream(dllPath, FileMode.Create, FileAccess.Write))
-                                resourceStream.CopyTo(fileStream);
-                        }
-                        WriteLog($"✓ DLL提取成功：{dllPath}");
-                        try { Assembly.LoadFrom(dllPath); WriteLog($"预加载程序集成功：{dllName}"); }
-                        catch (Exception ex) { WriteLog($"预加载程序集失败：{ex.Message}"); }
+                        resourceStream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resName);
+                        if (resourceStream != null) break;
                     }
+
+                    if (resourceStream == null)
+                    {
+                        WriteLog($"错误：找不到嵌入式资源 {dllName}");
+                        WriteLog("可用的资源列表：");
+                        foreach (string res in Assembly.GetExecutingAssembly().GetManifestResourceNames())
+                            WriteLog($"  - {res}");
+                        continue;
+                    }
+
+                    using (resourceStream)
+                    using (FileStream fileStream = new FileStream(dllPath, FileMode.Create, FileAccess.Write))
+                    {
+                        resourceStream.CopyTo(fileStream);
+                    }
+                    WriteLog($"√ DLL提取成功：{dllPath}");
+                    try { Assembly.LoadFrom(dllPath); WriteLog($"预加载程序集成功：{dllName}"); }
+                    catch (Exception ex) { WriteLog($"预加载程序集失败：{ex.Message}"); }
                 }
                 catch (Exception ex)
                 {
-                    WriteLog($"提取DLL {dllName} 时出错：{ex.Message}");
+                    WriteLog($"× 提取DLL {dllName} 时出错：{ex.Message}");
                 }
             }
         }

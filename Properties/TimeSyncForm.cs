@@ -1,12 +1,12 @@
 ﻿using Microsoft.Win32;
 using Microsoft.Win32.TaskScheduler;
 using System;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
@@ -31,6 +31,9 @@ namespace TimeSyncTool
         private int _volumeLevel = 50;
         private bool _autoVolume = false;
         private bool _killWps = false;
+
+        // 程序版本号（从程序集读取，统一管理）
+        private readonly string _versionString;
 
         // 公共属性（供 SettingsForm 访问）
         public bool AutoStart
@@ -84,9 +87,6 @@ namespace TimeSyncTool
             public short wSecond;
             public short wMilliseconds;
         }
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool SetSystemTime(ref SYSTEMTIME st);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool SetLocalTime(ref SYSTEMTIME st);
@@ -177,7 +177,6 @@ namespace TimeSyncTool
         private const int MAX_RETRIES = 3;
         private const int SECOND_STAGE_RETRIES = 3;
         private const int RETRY_DELAY_MS = 2000;
-        private const int SUCCESS_DELAY_MS = 3000;
         private const int FINAL_FAILURE_DELAY_MS = 5000;
         private const int STAGE_DISPLAY_DELAY_MS = 2000;
 
@@ -190,7 +189,6 @@ namespace TimeSyncTool
 
         // 用于线程安全的UI更新
         private delegate void UpdateStatusDelegate(string text, Color color);
-        private delegate void ShowMessageDelegate(string message, string title);
         private delegate void UpdateProgressBarDelegate(bool visible, int? value = null);
         private delegate void UpdateButtonDelegate(bool enabled);
 
@@ -204,6 +202,9 @@ namespace TimeSyncTool
 
         public TimeSyncForm()
         {
+            // 获取程序集版本号
+            _versionString = Assembly.GetExecutingAssembly().GetName().Version.ToString();
+
             try
             {
                 WriteLog("构造函数开始");
@@ -227,6 +228,7 @@ namespace TimeSyncTool
                         }
                     }
                 };
+
                 LoadSettings();
                 SetupForm();
                 InitializeTrayIcon();
@@ -265,7 +267,6 @@ namespace TimeSyncTool
 
             ToolStripMenuItem viewMenu = new ToolStripMenuItem("视图(&V)");
             ToolStripMenuItem showLogItem = new ToolStripMenuItem("打开日志(&L)");
-            // 修改：点击后打开日志文件夹
             showLogItem.Click += (s, e) => OpenLogFolder();
             viewMenu.DropDownItems.Add(showLogItem);
 
@@ -352,7 +353,6 @@ namespace TimeSyncTool
             };
         }
 
-        // 新增方法：打开日志文件夹并选中日志文件
         private void OpenLogFolder()
         {
             try
@@ -362,7 +362,6 @@ namespace TimeSyncTool
                 {
                     Directory.CreateDirectory(folderPath);
                 }
-                // 使用 explorer.exe 打开文件夹并选中日志文件
                 Process.Start("explorer.exe", $"/select,\"{LogFilePath}\"");
             }
             catch (Exception ex)
@@ -379,8 +378,15 @@ namespace TimeSyncTool
                 WriteLog("Load 事件开始");
                 WriteLog($"SilentStart 当前值: {SilentStart}");
 
-                // 确保开机自启状态与设置一致
                 EnsureAutoStartConsistency();
+
+                if (Program.PendingUpdateInfo != null && trayIcon != null)
+                {
+                    trayIcon.ShowBalloonTip(5000, "软件更新",
+                        $"Yeah, 检测到新版本 {Program.PendingUpdateInfo.Item1}，{Program.PendingUpdateInfo.Item2}",
+                        ToolTipIcon.Info);
+                    Program.PendingUpdateInfo = null;
+                }
 
                 if (SilentStart)
                 {
@@ -422,7 +428,7 @@ namespace TimeSyncTool
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(LogFilePath));
-                File.AppendAllText(LogFilePath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {message}\n\n");
+                File.AppendAllText(LogFilePath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {message}\n");
             }
             catch { }
         }
@@ -454,7 +460,7 @@ namespace TimeSyncTool
             if (isSyncing)
             {
                 DialogResult result = MessageBox.Show("同步正在进行中，宁真的要强制退出吗？",
-                    "Yes, Sir!", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    "你真的要退出吗？", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
 
                 if (result == DialogResult.Yes)
                 {
@@ -523,7 +529,6 @@ namespace TimeSyncTool
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
-            // 如果是强制退出、权限错误，或者同步已完成，则直接清理托盘图标并退出
             if (forceExit || isPermissionError || syncCompleted)
             {
                 if (trayIcon != null)
@@ -545,7 +550,6 @@ namespace TimeSyncTool
                 return;
             }
 
-            // 同步未完成：取消关闭，隐藏到托盘
             if (!syncCompleted)
             {
                 e.Cancel = true;
@@ -621,7 +625,7 @@ namespace TimeSyncTool
             UpdateButton(false);
 
             logTextBox.Clear();
-            logTextBox.AppendText("PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.26.3.14\n");
+            logTextBox.AppendText($"PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.{_versionString}\n");
             logTextBox.AppendText(new string('-', 50) + "\n");
 
             syncThread = new Thread(new ThreadStart(() =>
@@ -632,7 +636,7 @@ namespace TimeSyncTool
                     UpdateStatus("正在初始化...", Color.Yellow);
                     UpdateProgressBar(true);
 
-                    AddLog("PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.26.3.14\n", Color.DarkBlue);
+                    AddLog($"PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.{_versionString}\n", Color.DarkBlue);
                     AddLog($"可用时间服务器: {NtpServers.Length} 个\n", Color.DarkBlue);
                     AddLog(new string('-', 50) + "\n", Color.DarkGray);
 
@@ -675,7 +679,7 @@ namespace TimeSyncTool
                         }
                         else
                         {
-                            AddLog("√ 完成 (未发现WPS进程)\n", Color.Green);
+                            AddLog($"√ 完成 (未发现WPS进程)\n", Color.Green);
                             AddLog("未发现WPS进程，继续进行时间同步\n", Color.DarkGreen);
                         }
                         WriteLog("结束WPS进程完成");
@@ -753,13 +757,18 @@ namespace TimeSyncTool
                         if (trayIcon != null)
                             trayIcon.ShowBalloonTip(3000, "时间同步完成", "系统时间已成功同步！后台更新检测中...", ToolTipIcon.Info);
 
-                        // 等待一小段时间让用户看到提示，然后隐藏窗口到托盘
                         Thread.Sleep(2000);
                         this.Invoke(new MethodInvoker(() => MinimizeToTray()));
 
-                        // 在 UI 线程上创建定时器，监控更新检查状态
                         this.Invoke(new MethodInvoker(() =>
                         {
+                            if (Program.UpdateCheckCompleted)
+                            {
+                                syncCompleted = true;
+                                Application.Exit();
+                                return;
+                            }
+
                             System.Windows.Forms.Timer updateCheckTimer = new System.Windows.Forms.Timer();
                             updateCheckTimer.Interval = 1000;
                             updateCheckTimer.Tick += (s, args) =>
@@ -767,37 +776,12 @@ namespace TimeSyncTool
                                 if (Program.UpdateCheckCompleted)
                                 {
                                     updateCheckTimer.Stop();
-                                    try
-                                    {
-                                        if (trayIcon != null)
-                                        {
-                                            try
-                                            {
-                                                trayIcon.Visible = false;
-                                                trayIcon.Dispose();
-                                            }
-                                            catch (Exception ex)
-                                            {
-                                                WriteLog($"退出时清理托盘图标出错：{ex.Message}");
-                                            }
-                                            finally
-                                            {
-                                                trayIcon = null;
-                                            }
-                                        }
-                                        Application.Exit(); // 直接退出，不再触发 FormClosing 的隐藏
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        WriteLog($"退出过程中发生异常：{ex.Message}");
-                                        Environment.Exit(1);
-                                    }
+                                    syncCompleted = true;
+                                    Application.Exit();
                                 }
                             };
                             updateCheckTimer.Start();
                         }));
-
-                        // 注意：不设置 syncCompleted = true，程序继续运行
                     }
                     else if (adminPermissionError)
                     {
@@ -821,6 +805,7 @@ namespace TimeSyncTool
                                 Process.Start(startInfo);
                             }
                             catch { }
+                            Environment.Exit(0);
                         }
 
                         UpdateButton(true);
@@ -996,38 +981,27 @@ namespace TimeSyncTool
             Application.DoEvents();
         }
 
-        private void ShowMessage(string message, string title)
-        {
-            if (this.InvokeRequired)
-            {
-                try
-                {
-                    this.Invoke(new ShowMessageDelegate(ShowMessage), message, title);
-                }
-                catch { }
-                return;
-            }
-            MessageBox.Show(message, title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-
         private static bool SetSystemVolume(float volumeLevel)
         {
+            IMMDeviceEnumerator enumerator = null;
+            IMMDevice device = null;
+            IAudioEndpointVolume volume = null;
             try
             {
                 if (volumeLevel < 0.0f || volumeLevel > 1.0f)
                     return false;
 
-                var enumerator = new MMDeviceEnumerator() as IMMDeviceEnumerator;
+                enumerator = new MMDeviceEnumerator() as IMMDeviceEnumerator;
                 if (enumerator == null) return false;
 
-                int hr = enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, ERole.eMultimedia, out IMMDevice device);
+                int hr = enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, ERole.eMultimedia, out device);
                 if (hr != 0 || device == null) return false;
 
                 Guid IID_IAudioEndpointVolume = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
                 hr = device.Activate(IID_IAudioEndpointVolume, 0, IntPtr.Zero, out object obj);
                 if (hr != 0 || obj == null) return false;
 
-                var volume = obj as IAudioEndpointVolume;
+                volume = obj as IAudioEndpointVolume;
                 if (volume == null) return false;
 
                 hr = volume.SetMasterVolumeLevelScalar(volumeLevel, Guid.Empty);
@@ -1036,6 +1010,12 @@ namespace TimeSyncTool
             catch
             {
                 return false;
+            }
+            finally
+            {
+                if (volume != null) Marshal.ReleaseComObject(volume);
+                if (device != null) Marshal.ReleaseComObject(device);
+                if (enumerator != null) Marshal.ReleaseComObject(enumerator);
             }
         }
 
@@ -1213,11 +1193,20 @@ namespace TimeSyncTool
             {
                 using (var key = Registry.CurrentUser.CreateSubKey(SETTINGS_REGISTRY_PATH))
                 {
-                    _autoStart = Convert.ToBoolean(key.GetValue("AutoStart", true));
-                    _silentStart = Convert.ToBoolean(key.GetValue("SilentStart", false));
-                    _autoVolume = Convert.ToBoolean(key.GetValue("AutoVolume", true));
-                    _volumeLevel = Convert.ToInt32(key.GetValue("VolumeLevel", 60));
-                    _killWps = Convert.ToBoolean(key.GetValue("KillWps", true));
+                    object val = key.GetValue("AutoStart", true);
+                    _autoStart = val is bool ? (bool)val : Convert.ToBoolean(val);
+
+                    val = key.GetValue("SilentStart", false);
+                    _silentStart = val is bool ? (bool)val : Convert.ToBoolean(val);
+
+                    val = key.GetValue("AutoVolume", true);
+                    _autoVolume = val is bool ? (bool)val : Convert.ToBoolean(val);
+
+                    val = key.GetValue("VolumeLevel", 60);
+                    _volumeLevel = val is int ? (int)val : Convert.ToInt32(val);
+
+                    val = key.GetValue("KillWps", true);
+                    _killWps = val is bool ? (bool)val : Convert.ToBoolean(val);
                 }
             }
             catch
@@ -1267,7 +1256,6 @@ namespace TimeSyncTool
                             return;
                         }
 
-                        // 如果任务已存在，先删除
                         Microsoft.Win32.TaskScheduler.Task existingTask = ts.GetTask(TASK_NAME);
                         if (existingTask != null)
                         {
@@ -1275,22 +1263,18 @@ namespace TimeSyncTool
                             WriteLog("旧任务已删除");
                         }
 
-                        // 创建新任务
                         TaskDefinition td = ts.NewTask();
                         td.RegistrationInfo.Description = "川中计算机协会 - 陈叔叔系统优化工具";
                         td.RegistrationInfo.Author = "TimeSyncTool";
 
-                        // 设置触发器
                         td.Triggers.Add(new LogonTrigger
                         {
                             UserId = null,
                             Delay = TimeSpan.FromSeconds(5)
                         });
 
-                        // 设置操作
                         td.Actions.Add(new Microsoft.Win32.TaskScheduler.ExecAction(Application.ExecutablePath, null, null));
 
-                        // 注册任务
                         ts.RootFolder.RegisterTaskDefinition(TASK_NAME, td);
                         WriteLog($"√ 任务计划创建成功");
                     }
@@ -1321,16 +1305,5 @@ namespace TimeSyncTool
                 settingsForm.ShowDialog();
             }
         }
-
-        private void InitializeComponent()
-        {
-            this.SuspendLayout();
-            this.ClientSize = new System.Drawing.Size(284, 261);
-            this.Name = "TimeSyncForm";
-            this.Load += new System.EventHandler(this.TimeSyncForm_Load);
-            this.ResumeLayout(false);
-        }
-
-        private void TimeSyncForm_Load_1(object sender, EventArgs e) { }
     }
 }
