@@ -55,8 +55,9 @@
 - 后台检测新版本
 
 ### 2. 设置选项
-<img width="236" height="175" alt="image" src="https://github.com/user-attachments/assets/71c1cb0d-7a74-4fac-bee4-491a538928a8" />
 点击菜单栏 **文件 → 设置** 打开设置窗口：
+
+<img width="236" height="175" alt="image" src="https://github.com/user-attachments/assets/71c1cb0d-7a74-4fac-bee4-491a538928a8" />
 
 | 选项 | 说明 |
 |------|------|
@@ -166,7 +167,7 @@ SeewoOptimizer/
 ├── TimeSyncForm.cs         # 主窗体、时间同步核心、音量调节、WPS 清理
 ├── SettingsForm.cs         # 设置窗体（需自行实现）
 ├── Microsoft.Win32.TaskScheduler.dll  # 任务计划依赖（内嵌资源）
-└── app.ico                 # 程序图标（嵌入资源）
+└── well.ico                 # 程序图标（嵌入资源）
 ```
 
 ---
