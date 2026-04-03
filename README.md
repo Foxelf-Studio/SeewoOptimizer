@@ -55,9 +55,8 @@
 - 后台检测新版本
 
 ### 2. 设置选项
-
-点击菜单栏 **文件 → 设置** 打开设置窗口：
 <img width="236" height="175" alt="image" src="https://github.com/user-attachments/assets/71c1cb0d-7a74-4fac-bee4-491a538928a8" />
+点击菜单栏 **文件 → 设置** 打开设置窗口：
 
 | 选项 | 说明 |
 |------|------|
