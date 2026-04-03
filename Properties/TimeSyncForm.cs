@@ -11,6 +11,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 using WindowsFormsApp1;
+using Microsoft.VisualBasic;
 
 namespace TimeSyncTool
 {
@@ -229,6 +230,8 @@ namespace TimeSyncTool
                     }
                 };
 
+                // 从当前 exe 文件加载图标作为窗体图标（任务栏图标）
+                this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
                 LoadSettings();
                 SetupForm();
                 InitializeTrayIcon();
@@ -309,12 +312,15 @@ namespace TimeSyncTool
             this.Controls.Add(progressBar);
 
             int buttonY = 510;
+            int buttonWidth = 105;
+            int buttonHeight = 35;
+            int buttonSpacing = 12;
 
             retryButton = new Button
             {
                 Text = "重新同步",
                 Location = new Point(10, buttonY),
-                Size = new Size(120, 35),
+                Size = new Size(buttonWidth, buttonHeight),
                 Font = new Font("Microsoft YaHei", 10),
                 Enabled = false
             };
@@ -324,8 +330,8 @@ namespace TimeSyncTool
             showConsoleButton = new Button
             {
                 Text = "显示窗口",
-                Location = new Point(140, buttonY),
-                Size = new Size(120, 35),
+                Location = new Point(10 + buttonWidth + buttonSpacing, buttonY),
+                Size = new Size(buttonWidth, buttonHeight),
                 Font = new Font("Microsoft YaHei", 10),
                 Visible = false
             };
@@ -335,12 +341,53 @@ namespace TimeSyncTool
             hideConsoleButton = new Button
             {
                 Text = "隐藏到托盘",
-                Location = new Point(270, buttonY),
-                Size = new Size(120, 35),
+                Location = new Point(10 + (buttonWidth + buttonSpacing) * 2, buttonY),
+                Size = new Size(buttonWidth, buttonHeight),
                 Font = new Font("Microsoft YaHei", 10)
             };
             hideConsoleButton.Click += (s, e) => MinimizeToTray();
             this.Controls.Add(hideConsoleButton);
+
+            // GitHub 仓库按钮
+            Button githubButton = new Button
+            {
+                Text = "GitHub 仓库",
+                Location = new Point(10 + (buttonWidth + buttonSpacing) * 3, buttonY),
+                Size = new Size(buttonWidth, buttonHeight),
+                Font = new Font("Microsoft YaHei", 10),
+               
+            };
+            githubButton.Click += (s, e) =>
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "https://github.com/Foxelf-Studio/SeewoOptimizer",
+                        UseShellExecute = true
+                    });
+                }
+                catch (Exception ex)
+                {
+                    WriteLog($"打开 GitHub 页面失败：{ex.Message}");
+                    MessageBox.Show("无法打开浏览器，请手动访问：\nhttps://github.com/Foxelf-Studio/SeewoOptimizer",
+                        "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            };
+            this.Controls.Add(githubButton);
+
+            // 卸载程序按钮
+            Button uninstallButton = new Button
+            {
+                Text = "卸载程序",
+                Location = new Point(10 + (buttonWidth + buttonSpacing) * 4, buttonY),
+                Size = new Size(buttonWidth, buttonHeight),
+                Font = new Font("Microsoft YaHei", 10),
+                ForeColor = Color.Maroon,
+                UseVisualStyleBackColor = true
+            };
+            uninstallButton.Click += UninstallButton_Click;
+            this.Controls.Add(uninstallButton);
 
             this.FormClosing += MainForm_FormClosing;
             this.FormClosed += (s, e) =>
@@ -516,9 +563,12 @@ namespace TimeSyncTool
             exitItem.Click += (s, e) => ExitProgram();
             trayMenu.Items.Add(exitItem);
 
+            // 从当前 exe 文件加载图标作为托盘图标
+            Icon trayIconIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+
             trayIcon = new NotifyIcon
             {
-                Icon = SystemIcons.Information,
+                Icon = trayIconIcon ?? SystemIcons.Information,
                 Text = "川中计算机协会 - 系统优化工具",
                 ContextMenuStrip = trayMenu,
                 Visible = false
@@ -1305,5 +1355,176 @@ namespace TimeSyncTool
                 settingsForm.ShowDialog();
             }
         }
+
+        /// <summary>
+        /// 卸载程序按钮点击事件
+        /// </summary>
+        private void UninstallButton_Click(object sender, EventArgs e)
+        {
+            // 使用 UI 线程执行，避免跨线程问题
+            if (this.InvokeRequired)
+            {
+                this.Invoke(new System.Action(() => UninstallButton_Click(sender, e)));
+                return;
+            }
+
+            // 弹出输入框，要求输入暗号
+            string input = Microsoft.VisualBasic.Interaction.InputBox(
+                "请输入卸载暗号以确认卸载程序：",
+                "卸载确认",
+                "",
+                -1, -1);
+
+            if (input != "0319")
+            {
+                MessageBox.Show("暗号错误，卸载已取消。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // 确认卸载
+            DialogResult confirm = MessageBox.Show(
+                "确定要卸载本程序吗？\n\n这将删除：\n" +
+                "• 程序生成的所有日志文件\n" +
+                "• 更新缓存目录\n" +
+                "• 注册表中的设置项\n" +
+                "• 开机自启任务计划\n\n" +
+                "注意：程序文件本身不会被删除，请手动删除。",
+                "确认卸载",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (confirm != DialogResult.Yes)
+                return;
+
+            // 开始卸载，并在主窗口显示日志（确保在 UI 线程）
+            AddLog("\n========== 开始卸载程序 ==========\n", Color.DarkRed);
+            AddLog("正在清理程序生成的数据...\n", Color.DarkRed);
+            Application.DoEvents(); // 强制刷新 UI
+
+            bool success = true;
+
+            // 1. 删除日志目录
+            try
+            {
+                string logDir = Path.GetDirectoryName(LogFilePath);
+                if (Directory.Exists(logDir))
+                {
+                    Directory.Delete(logDir, true);
+                    AddLog($"√ 已删除日志目录: {logDir}\n", Color.Green);
+                }
+                else
+                {
+                    AddLog("日志目录不存在，跳过\n", Color.Gray);
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog($"× 删除日志目录失败: {ex.Message}\n", Color.Red);
+                success = false;
+            }
+            Application.DoEvents();
+
+            // 2. 删除更新目录
+            try
+            {
+                string updateDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "TimeSyncTool", "updates");
+                if (Directory.Exists(updateDir))
+                {
+                    Directory.Delete(updateDir, true);
+                    AddLog($"√ 已删除更新目录: {updateDir}\n", Color.Green);
+                }
+                else
+                {
+                    AddLog("更新目录不存在，跳过\n", Color.Gray);
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog($"× 删除更新目录失败: {ex.Message}\n", Color.Red);
+                success = false;
+            }
+            Application.DoEvents();
+
+            // 3. 删除注册表项
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey("Software", true))
+                {
+                    if (key != null)
+                    {
+                        key.DeleteSubKeyTree("TimeSyncTool", false);
+                        AddLog("√ 已删除注册表项: HKCU\\Software\\TimeSyncTool\n", Color.Green);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!ex.Message.Contains("找不到"))
+                    AddLog($"× 删除注册表项失败: {ex.Message}\n", Color.Red);
+                else
+                    AddLog("注册表项不存在，跳过\n", Color.Gray);
+            }
+            Application.DoEvents();
+
+            // 4. 删除开机自启任务计划
+            try
+            {
+                using (TaskService ts = new TaskService())
+                {
+                    var task = ts.GetTask(TASK_NAME);
+                    if (task != null)
+                    {
+                        ts.RootFolder.DeleteTask(TASK_NAME, false);
+                        AddLog("√ 已删除开机自启任务计划\n", Color.Green);
+                    }
+                    else
+                    {
+                        AddLog("开机自启任务计划不存在，跳过\n", Color.Gray);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog($"× 删除任务计划失败: {ex.Message}\n", Color.Red);
+                success = false;
+            }
+            Application.DoEvents();
+
+            // 5. 提示删除完成
+            AddLog("\n========== 卸载完成 ==========\n", success ? Color.Green : Color.Red);
+            if (success)
+            {
+                AddLog("程序生成的数据已清理完毕。\n", Color.DarkGreen);
+                AddLog("您可以手动删除本程序文件（SeewoOpt.exe）及其所在文件夹。\n", Color.DarkGreen);
+            }
+            else
+            {
+                AddLog("部分项目清理失败，请手动检查。\n", Color.DarkRed);
+            }
+
+            // 询问是否立即退出程序
+            DialogResult exit = MessageBox.Show(
+                "卸载操作已完成。是否立即退出程序？",
+                "卸载完成",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (exit == DialogResult.Yes)
+            {
+                // 清理托盘图标（确保在 UI 线程）
+                if (trayIcon != null)
+                {
+                    trayIcon.Visible = false;
+                    trayIcon.Dispose();
+                    trayIcon = null;
+                }
+
+                // 强制终止进程，避免任何残留
+                Environment.Exit(0);
+            }
+        }
+
     }
 }
