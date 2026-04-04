@@ -155,7 +155,7 @@ sequenceDiagram
 - 删除 `%LOCALAPPDATA%\TimeSyncTool` 下所有子目录
 - 删除注册表 `HKCU\Software\TimeSyncTool`
 - 删除任务计划 `TimeSyncTool`
-- 需要输入暗号 `0319` 确认，防止误操作
+- 需要输入暗号 `0319` 确认，防止老师看它不顺眼卸载了
 
 ---
 
