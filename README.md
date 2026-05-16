@@ -207,3 +207,4 @@ MIT License © 2025 川中计算机协会
 ## 🤝 贡献与反馈
 
 - 提交 Issue：[GitHub Issues](https://github.com/Foxelf-Studio/SeewoOptimizer/issues)
+- 发邮件给我：thetimeflies@vip.qq.com
