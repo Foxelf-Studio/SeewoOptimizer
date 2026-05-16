@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -14,7 +15,7 @@ namespace WindowsFormsApp1
 {
     static class Program
     {
-        private static readonly string LogFilePath = Path.Combine(
+        public static readonly string LogFilePath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "TimeSyncTool", "startup.log");
 
@@ -33,6 +34,9 @@ namespace WindowsFormsApp1
 
         // 缓存更新信息，防止事件错过
         public static Tuple<string, string> PendingUpdateInfo { get; set; }
+
+        // 更新文件的预期 SHA256 哈希（从发布说明中提取）
+        private static string _expectedUpdateHash = null;
 
         // 互斥体对象
         private static Mutex singleInstanceMutex;
@@ -217,7 +221,6 @@ namespace WindowsFormsApp1
             {
                 // 强制使用 TLS 1.2
                 ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
-                ServicePointManager.ServerCertificateValidationCallback = delegate { return true; };
 
                 WriteLog("开始后台检查更新...");
 
@@ -266,6 +269,24 @@ namespace WindowsFormsApp1
                         return;
                     }
 
+                    // 尝试从发布说明（body）中提取预期的 SHA256 哈希
+                    _expectedUpdateHash = null;
+                    Match bodyMatch = Regex.Match(jsonResponse, @"""body""\s*:\s*""((?:[^""\\]|\\.)*)""", RegexOptions.Singleline);
+                    if (bodyMatch.Success)
+                    {
+                        string body = Regex.Unescape(bodyMatch.Groups[1].Value);
+                        Match hashMatch = Regex.Match(body, @"SHA256[:\s]+([A-Fa-f0-9]{64})");
+                        if (hashMatch.Success)
+                        {
+                            _expectedUpdateHash = hashMatch.Groups[1].Value.ToUpperInvariant();
+                            WriteLog($"从发布说明中提取到 SHA256: {_expectedUpdateHash}");
+                        }
+                        else
+                        {
+                            WriteLog("发布说明中未找到 SHA256 哈希，将跳过完整性校验");
+                        }
+                    }
+
                     // 从 URL 中提取文件名（更可靠）
                     string fileName = Path.GetFileName(new Uri(downloadUrl).LocalPath);
                     WriteLog($"提取到文件名: {fileName}");
@@ -284,7 +305,7 @@ namespace WindowsFormsApp1
                         UpdateDetected?.Invoke(latestVersion.ToString(), "正在自动更新...");
 
                         // 带重试的下载
-                        await DownloadUpdateWithRetryAsync(downloadUrl, fileName, latestVersion);
+                        await DownloadUpdateWithRetryAsync(downloadUrl, fileName, latestVersion, _expectedUpdateHash);
                     }
                     else
                     {
@@ -307,7 +328,7 @@ namespace WindowsFormsApp1
         /// <summary>
         /// 带重试机制的下载更新文件
         /// </summary>
-        private static async Task<bool> DownloadUpdateWithRetryAsync(string downloadUrl, string fileName, Version newVersion)
+        private static async Task<bool> DownloadUpdateWithRetryAsync(string downloadUrl, string fileName, Version newVersion, string expectedHash = null)
         {
             const int maxRetries = 3;
             const int retryDelayMs = 2000;
@@ -316,7 +337,7 @@ namespace WindowsFormsApp1
             {
                 try
                 {
-                    await DownloadUpdateAsync(downloadUrl, fileName, newVersion);
+                    await DownloadUpdateAsync(downloadUrl, fileName, newVersion, expectedHash);
                     return true; // 成功
                 }
                 catch (Exception ex)
@@ -341,7 +362,7 @@ namespace WindowsFormsApp1
         /// <summary>
         /// 异步下载更新文件（内部不捕获异常，由重试方法处理）
         /// </summary>
-        private static async Task DownloadUpdateAsync(string downloadUrl, string fileName, Version newVersion)
+        private static async Task DownloadUpdateAsync(string downloadUrl, string fileName, Version newVersion, string expectedHash = null)
         {
             string downloadedFile = Path.Combine(UPDATE_DIR, fileName);
             string currentExe = Application.ExecutablePath;
@@ -380,7 +401,34 @@ namespace WindowsFormsApp1
                 }
             }
 
-            WriteLog("下载完成，准备更新脚本");
+            WriteLog("下载完成，验证文件完整性...");
+
+            // 验证文件是否为有效的 PE 可执行文件
+            if (!IsValidPE(downloadedFile))
+            {
+                try { File.Delete(downloadedFile); } catch { }
+                throw new Exception("下载的文件不是有效的 Windows 可执行文件（PE 头验证失败），更新已取消");
+            }
+
+            // 计算并记录 SHA256 哈希
+            string actualHash = ComputeSHA256(downloadedFile);
+            WriteLog($"下载文件 SHA256: {actualHash}");
+
+            // 如果发布说明中提供了预期哈希，进行比对
+            if (!string.IsNullOrEmpty(expectedHash))
+            {
+                if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    try { File.Delete(downloadedFile); } catch { }
+                    throw new Exception($"文件哈希验证失败！\n期望: {expectedHash}\n实际: {actualHash}\n更新已取消，请检查发布页。");
+                }
+                WriteLog("文件哈希验证通过");
+            }
+            else
+            {
+                WriteLog("警告：未提供预期哈希值，跳过完整性校验");
+            }
+
             CreateUpdateScript(updaterScript, currentExe, downloadedFile, newVersion);
             WriteLog("更新脚本创建成功，准备退出主程序，由更新脚本完成后台替换");
 
@@ -522,6 +570,53 @@ exit
                 {
                     WriteLog($"× 提取DLL {dllName} 时出错：{ex.Message}");
                 }
+            }
+        }
+
+        /// <summary>
+        /// 验证文件是否为有效的 Windows PE 可执行文件（检查 MZ 和 PE 头）
+        /// </summary>
+        private static bool IsValidPE(string filePath)
+        {
+            try
+            {
+                using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read))
+                {
+                    if (fs.Length < 64) return false;
+
+                    byte[] mzHeader = new byte[2];
+                    fs.Read(mzHeader, 0, 2);
+                    if (mzHeader[0] != 'M' || mzHeader[1] != 'Z') return false;
+
+                    fs.Seek(0x3C, SeekOrigin.Begin);
+                    byte[] peOffsetBytes = new byte[4];
+                    fs.Read(peOffsetBytes, 0, 4);
+                    int peOffset = BitConverter.ToInt32(peOffsetBytes, 0);
+
+                    if (peOffset < 64 || peOffset > fs.Length - 4) return false;
+
+                    fs.Seek(peOffset, SeekOrigin.Begin);
+                    byte[] peHeader = new byte[4];
+                    fs.Read(peHeader, 0, 4);
+                    return peHeader[0] == 'P' && peHeader[1] == 'E' && peHeader[2] == 0 && peHeader[3] == 0;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 计算文件的 SHA256 哈希值
+        /// </summary>
+        private static string ComputeSHA256(string filePath)
+        {
+            using (var sha256 = SHA256.Create())
+            using (var stream = File.OpenRead(filePath))
+            {
+                byte[] hash = sha256.ComputeHash(stream);
+                return BitConverter.ToString(hash).Replace("-", "").ToUpperInvariant();
             }
         }
 

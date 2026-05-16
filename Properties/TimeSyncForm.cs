@@ -70,11 +70,6 @@ namespace TimeSyncTool
         private const string SETTINGS_REGISTRY_PATH = @"Software\TimeSyncTool";
         private const string TASK_NAME = "TimeSyncTool";
 
-        // 日志文件路径
-        private readonly string LogFilePath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "TimeSyncTool", "startup.log");
-
         // Windows API 用于设置系统时间
         [StructLayout(LayoutKind.Sequential)]
         public struct SYSTEMTIME
@@ -404,12 +399,12 @@ namespace TimeSyncTool
         {
             try
             {
-                string folderPath = Path.GetDirectoryName(LogFilePath);
+                string folderPath = Path.GetDirectoryName(Program.LogFilePath);
                 if (!Directory.Exists(folderPath))
                 {
                     Directory.CreateDirectory(folderPath);
                 }
-                Process.Start("explorer.exe", $"/select,\"{LogFilePath}\"");
+                Process.Start("explorer.exe", $"/select,\"{Program.LogFilePath}\"");
             }
             catch (Exception ex)
             {
@@ -474,8 +469,8 @@ namespace TimeSyncTool
         {
             try
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(LogFilePath));
-                File.AppendAllText(LogFilePath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {message}\n");
+                Directory.CreateDirectory(Path.GetDirectoryName(Program.LogFilePath));
+                File.AppendAllText(Program.LogFilePath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {message}\n");
             }
             catch { }
         }
@@ -514,12 +509,11 @@ namespace TimeSyncTool
                     forceExit = true;
                     syncCompleted = true;
 
-                    try
+                    if (syncThread != null && syncThread.IsAlive)
                     {
-                        if (syncThread != null && syncThread.IsAlive)
-                            syncThread.Abort();
+                        if (!syncThread.Join(3000))
+                            WriteLog("等待同步线程退出超时");
                     }
-                    catch { }
 
                     if (trayIcon != null)
                     {
@@ -751,6 +745,7 @@ namespace TimeSyncTool
 
                     for (int i = 0; i < 4 && !success && !adminPermissionError; i++)
                     {
+                        if (forceExit) { WriteLog("同步被用户取消（第一阶段）"); return; }
                         WriteLog($"尝试服务器 {i + 1}: {NtpServers[i]}");
                         UpdateStatus($"尝试服务器 {i + 1}/4: {NtpServers[i]}", Color.DarkBlue);
                         AddLog($"尝试服务器 {i + 1}/4: {NtpServers[i]}\n", Color.Black);
@@ -772,14 +767,17 @@ namespace TimeSyncTool
                         AddLog("第一阶段同步失败，启动备用服务器\n", Color.DarkOrange);
                         AddLog(new string('=', 60) + "\n", Color.DarkOrange);
 
+                        if (forceExit) { WriteLog("同步被用户取消"); return; }
                         Thread.Sleep(STAGE_DISPLAY_DELAY_MS);
 
+                        if (forceExit) { WriteLog("同步被用户取消"); return; }
                         UpdateStatus("第二阶段: 备用时间服务器", Color.DarkCyan);
                         AddLog("第二阶段: 备用时间服务器\n", Color.DarkCyan);
 
                         int totalSecondStage = NtpServers.Length - 4;
                         for (int i = 4; i < NtpServers.Length && !success && !adminPermissionError; i++)
                         {
+                            if (forceExit) { WriteLog("同步被用户取消（第二阶段）"); return; }
                             int attemptNumber = i - 3;
                             WriteLog($"尝试备用服务器 {attemptNumber}: {NtpServers[i]}");
                             UpdateStatus($"尝试备用服务器 {attemptNumber}/{totalSecondStage}: {NtpServers[i]}", Color.DarkBlue);
@@ -807,7 +805,8 @@ namespace TimeSyncTool
                         if (trayIcon != null)
                             trayIcon.ShowBalloonTip(3000, "时间同步完成", "系统时间已成功同步！后台更新检测中...", ToolTipIcon.Info);
 
-                        Thread.Sleep(2000);
+                        if (!forceExit) Thread.Sleep(2000);
+                        if (forceExit) { WriteLog("同步被用户取消"); return; }
                         this.Invoke(new MethodInvoker(() => MinimizeToTray()));
 
                         this.Invoke(new MethodInvoker(() =>
@@ -870,16 +869,11 @@ namespace TimeSyncTool
                         AddLog($"\n（悲报！） 经过 {NtpServers.Length} 个服务器的尝试后，时间同步失败。\n", Color.DarkRed);
                         AddLog($"程序将在 {FINAL_FAILURE_DELAY_MS / 1000} 秒后自动关闭...\n", Color.DarkRed);
 
-                        Thread.Sleep(FINAL_FAILURE_DELAY_MS);
+                        if (!forceExit) Thread.Sleep(FINAL_FAILURE_DELAY_MS);
                         syncCompleted = true;
                         this.Invoke(new MethodInvoker(this.Close));
                     }
                     WriteLog("同步线程正常结束");
-                }
-                catch (ThreadAbortException)
-                {
-                    WriteLog("同步线程被中止");
-                    AddLog("\n同步已被用户中断\n", Color.DarkOrange);
                 }
                 catch (Exception ex)
                 {
@@ -1028,7 +1022,7 @@ namespace TimeSyncTool
                 logTextBox.SelectionColor = logTextBox.ForeColor;
 
             logTextBox.Refresh();
-            Application.DoEvents();
+
         }
 
         private static bool SetSystemVolume(float volumeLevel)
@@ -1399,14 +1393,14 @@ namespace TimeSyncTool
             // 开始卸载，并在主窗口显示日志（确保在 UI 线程）
             AddLog("\n========== 开始卸载程序 ==========\n", Color.DarkRed);
             AddLog("正在清理程序生成的数据...\n", Color.DarkRed);
-            Application.DoEvents(); // 强制刷新 UI
+
 
             bool success = true;
 
             // 1. 删除日志目录
             try
             {
-                string logDir = Path.GetDirectoryName(LogFilePath);
+                string logDir = Path.GetDirectoryName(Program.LogFilePath);
                 if (Directory.Exists(logDir))
                 {
                     Directory.Delete(logDir, true);
@@ -1422,7 +1416,7 @@ namespace TimeSyncTool
                 AddLog($"× 删除日志目录失败: {ex.Message}\n", Color.Red);
                 success = false;
             }
-            Application.DoEvents();
+
 
             // 2. 删除更新目录
             try
@@ -1445,7 +1439,7 @@ namespace TimeSyncTool
                 AddLog($"× 删除更新目录失败: {ex.Message}\n", Color.Red);
                 success = false;
             }
-            Application.DoEvents();
+
 
             // 3. 删除注册表项
             try
@@ -1466,7 +1460,7 @@ namespace TimeSyncTool
                 else
                     AddLog("注册表项不存在，跳过\n", Color.Gray);
             }
-            Application.DoEvents();
+
 
             // 4. 删除开机自启任务计划
             try
@@ -1490,7 +1484,7 @@ namespace TimeSyncTool
                 AddLog($"× 删除任务计划失败: {ex.Message}\n", Color.Red);
                 success = false;
             }
-            Application.DoEvents();
+
 
             // 5. 提示删除完成
             AddLog("\n========== 卸载完成 ==========\n", success ? Color.Green : Color.Red);
