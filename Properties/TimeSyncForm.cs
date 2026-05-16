@@ -1370,14 +1370,14 @@ namespace TimeSyncTool
 
             // 弹出输入框，要求输入暗号
             string input = Microsoft.VisualBasic.Interaction.InputBox(
-                "请输入卸载暗号以确认卸载程序：",
+                "请输入卸载暗号以确认卸载程序： （暗号请在github仓库readme中获取）",
                 "卸载确认",
                 "",
                 -1, -1);
 
             if (input != "0319")
             {
-                MessageBox.Show("暗号错误，卸载已取消。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("暗号错误，卸载已取消。可在github仓库readme找到暗号。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -1388,7 +1388,7 @@ namespace TimeSyncTool
                 "• 更新缓存目录\n" +
                 "• 注册表中的设置项\n" +
                 "• 开机自启任务计划\n\n" +
-                "注意：程序文件本身不会被删除，请手动删除。",
+                "注意：程序文件本身和dll文件不会被删除，请手动删除。",
                 "确认卸载",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning);

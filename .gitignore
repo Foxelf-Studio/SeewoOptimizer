@@ -1,0 +1,32 @@
+## Visual Studio / .NET 编译产物
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.userosscache
+*.sln.docstates
+
+## Visual Studio 缓存
+.vs/
+
+## NuGet
+packages/
+*.nupkg
+**/packages/*
+
+## 用户特定文件
+*.userprefs
+appsettings.*.json
+
+## 编译输出
+*.exe
+*.dll
+*.pdb
+*.exe.config
+
+## 临时文件
+*.tmp
+*.log
+*.vspscc
+*.vssscc
