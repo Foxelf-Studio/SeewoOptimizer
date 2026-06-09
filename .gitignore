@@ -1,0 +1,37 @@
+## Visual Studio / .NET 编译产物
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.userosscache
+*.sln.docstates
+
+## Visual Studio 缓存
+.vs/
+
+## NuGet
+packages/
+*.nupkg
+
+## 用户特定文件
+*.userprefs
+appsettings.*.json
+
+## 编译输出
+*.exe
+*.dll
+*.pdb
+*.exe.config
+
+## Claude Code
+.claude/
+
+## 临时文件
+*.tmp
+*.log
+*.vspscc
+*.vssscc
+
+## DLL 嵌入资源例外（编译需要）
+!WindowsFormsApp1/Microsoft.Win32.TaskScheduler.dll
