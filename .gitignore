@@ -13,6 +13,7 @@ obj/
 ## NuGet
 packages/
 *.nupkg
+**/packages/*
 
 ## 用户特定文件
 *.userprefs
@@ -26,7 +27,6 @@ appsettings.*.json
 
 ## Claude Code
 .claude/
-
 ## 临时文件
 *.tmp
 *.log
