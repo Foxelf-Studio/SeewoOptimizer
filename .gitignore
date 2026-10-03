@@ -35,3 +35,10 @@ appsettings.*.json
 
 ## DLL 嵌入资源例外（编译需要）
 !WindowsFormsApp1/Microsoft.Win32.TaskScheduler.dll
+
+## 签名私钥（绝不能提交，仅存在于发布者本机）
+*.pem
+*.key
+*.pfx
+*.p12
+signing/

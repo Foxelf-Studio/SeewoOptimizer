@@ -349,11 +349,12 @@ namespace WindowsFormsApp1
 
        
         /// <summary>
-        /// 异步下载更新文件（内部不捕获异常，由重试方法处理）
+        /// 异步下载更新文件并验证签名（内部不捕获异常，由重试方法处理）
         /// </summary>
         private static async Task DownloadUpdateAsync(string downloadUrl, string fileName, Version newVersion, string expectedHash = null)
         {
             string downloadedFile = Path.Combine(UPDATE_DIR, fileName);
+            string signatureFile = SignatureVerifier.GetSignaturePath(downloadedFile);
             string currentExe = Application.ExecutablePath;
             string updaterScript = Path.Combine(UPDATE_DIR, "update.bat");
 
@@ -364,7 +365,7 @@ namespace WindowsFormsApp1
                 // 使用 CancellationTokenSource 实现超时
                 using (var cts = new CancellationTokenSource())
                 {
-                    cts.CancelAfter(TimeSpan.FromSeconds(30)); // 30秒超时
+                    cts.CancelAfter(TimeSpan.FromSeconds(60)); // 60秒超时
 
                     client.DownloadProgressChanged += (s, e) =>
                     {
@@ -383,14 +384,34 @@ namespace WindowsFormsApp1
                     {
                         // 超时
                         client.CancelAsync();
-                        throw new TimeoutException("下载超时（30秒）");
+                        throw new TimeoutException("下载超时（60秒）");
                     }
 
                     await downloadTask; // 重新抛出可能的异常
                 }
             }
 
-            WriteLog("下载完成，开始验证文件...");
+            WriteLog("更新文件下载完成，下载配套签名...");
+
+            // 签名文件与 exe 同名同目录，仅后缀不同
+            string signatureUrl = downloadUrl + SignatureVerifier.SIGNATURE_EXTENSION;
+            try
+            {
+                using (WebClient client = new WebClient())
+                {
+                    await client.DownloadFileTaskAsync(new Uri(signatureUrl), signatureFile);
+                }
+                WriteLog("签名文件下载完成");
+            }
+            catch (Exception ex)
+            {
+                TryDelete(downloadedFile);
+                throw new Exception(
+                    "未找到更新文件的签名（应为 " + fileName + SignatureVerifier.SIGNATURE_EXTENSION +
+                    "）。\n请到发布页下载完整更新包。\n原因: " + ex.Message);
+            }
+
+            WriteLog("开始验证签名...");
 
             // 验证文件是否为有效的 PE 可执行文件
             if (!IsValidPE(downloadedFile))
@@ -399,32 +420,28 @@ namespace WindowsFormsApp1
                 throw new Exception("下载的文件不是有效的 Windows 可执行文件（PE 头验证失败），更新已取消");
             }
 
-            // 第一道也是唯一能抵御"仓库被入侵"的关卡：Authenticode 代码签名。
-            // 期望哈希来自同一个 HTTP 响应，攻击者能同时替换文件与哈希，
-            // 只能防下载损坏，防不了恶意篡改。签名才是真正的信任锚。
+            // 第一道也是唯一能抵御"仓库被入侵"的关卡：RSA 发布签名。
+            // 私钥只存在于发布者本机，攻击者即使拿到 GitHub 账号完全控制权，
+            // 没有私钥也造不出能通过验证的更新。
             if (!SignatureVerifier.IsAcceptable(downloadedFile, out string signatureInfo))
             {
                 TryDelete(downloadedFile);
+                TryDelete(signatureFile);
                 throw new Exception("下载的文件未通过签名校验，更新已取消。\n" + signatureInfo);
             }
             WriteLog($"签名校验: {signatureInfo}");
 
-            // 辅助校验：SHA256 只能证明文件与说明一致，不代表文件可信
+            // SHA256 仅作记录，便于排查下载损坏问题。
+            // 注意：它不能作为安全依据——期望哈希与文件来自同一 HTTP 响应，
+            // 攻击者能同时替换两者。真正的信任锚是上面的签名验证。
             string actualHash = ComputeSHA256(downloadedFile);
             WriteLog($"下载文件 SHA256: {actualHash}");
-
             if (!string.IsNullOrEmpty(expectedHash))
             {
-                if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
-                {
-                    TryDelete(downloadedFile);
-                    throw new Exception($"文件哈希验证失败！\n期望: {expectedHash}\n实际: {actualHash}\n更新已取消，请检查发布页。");
-                }
-                WriteLog("哈希校验通过");
-            }
-            else
-            {
-                WriteLog("未提供预期哈希值，已跳过哈希比对（签名校验为主要依据）");
+                bool matched = string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase);
+                WriteLog(matched
+                    ? "哈希与发布说明一致"
+                    : $"哈希与发布说明不一致（说明: {expectedHash}）——签名有效，不影响更新");
             }
 
             CreateUpdateScript(updaterScript, currentExe, downloadedFile, newVersion);
@@ -529,6 +546,7 @@ for %%F in (""%TARGET%"") do set /a SIZE=%%~zF
 if !SIZE! LSS 1024 goto :copyfailed
 
 del /f /q ""%SOURCE%"" > nul 2>&1
+del /f /q ""%SOURCE%.sig"" > nul 2>&1
 del /f /q ""%BACKUP%"" > nul 2>&1
 del /f /q ""%PENDING%"" > nul 2>&1
 del /f /q ""%~f0"" > nul 2>&1
