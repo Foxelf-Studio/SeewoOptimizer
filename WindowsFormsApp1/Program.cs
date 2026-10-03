@@ -5,19 +5,18 @@ using System.Net;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using SeewoOpt.Services;
 using TimeSyncTool;
 
 namespace WindowsFormsApp1
 {
     static class Program
     {
-        public static readonly string LogFilePath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "TimeSyncTool", "startup.log");
+        // 日志路径统一定义在 LogService，此处仅做转发以兼容既有调用点
+        public static readonly string LogFilePath = LogService.LogFilePath;
 
         // GitHub 配置
         private const string GITHUB_API = "https://api.github.com/repos/Foxelf-Studio/SeewoOptimizer/releases/latest";
@@ -213,7 +212,7 @@ namespace WindowsFormsApp1
         }
 
         /// <summary>
-        /// 异步检查 GitHub 上的新版本（使用正则提取，避免 JSON 解析错误）
+        /// 异步检查 GitHub 上的新版本
         /// </summary>
         private static async Task CheckForUpdatesAsync()
         {
@@ -241,61 +240,46 @@ namespace WindowsFormsApp1
                     WriteLog("GitHub API 响应成功");
                     WriteLog($"响应内容长度: {jsonResponse.Length}");
 
-                    // 提取 tag_name
-                    string tagName = null;
-                    string downloadUrl = null;
-
-                    Match tagMatch = Regex.Match(jsonResponse, @"""tag_name""\s*:\s*""([^""]+)""");
-                    if (tagMatch.Success)
+                    // 用框架自带的 JSON 序列化器解析，正确处理转义与多资产场景
+                    if (!ReleaseInfoParser.TryParse(jsonResponse, out ReleaseInfo release, out string parseError))
                     {
-                        tagName = tagMatch.Groups[1].Value;
-                        WriteLog($"提取到 tag_name: {tagName}");
-                    }
-                    else
-                    {
-                        WriteLog("未找到 tag_name");
+                        WriteLog($"解析 Release 信息失败: {parseError}");
                         return;
                     }
 
-                    // 提取第一个 assets 中的 browser_download_url
-                    Match urlMatch = Regex.Match(jsonResponse, @"""browser_download_url""\s*:\s*""([^""]+)""");
-                    if (urlMatch.Success)
+                    WriteLog($"提取到 tag_name: {release.TagName}");
+
+                    // 从资产列表中挑选可执行文件——不再简单取第一个
+                    ReleaseAsset asset = ReleaseInfoParser.SelectExecutableAsset(release.Assets);
+                    if (asset == null)
                     {
-                        downloadUrl = urlMatch.Groups[1].Value;
-                        WriteLog($"提取到下载地址: {downloadUrl}");
-                    }
-                    else
-                    {
-                        WriteLog("未找到 browser_download_url");
+                        WriteLog("未在 Release 资产中找到可执行文件（.exe/.msi）");
                         return;
                     }
 
-                    // 尝试从发布说明（body）中提取预期的 SHA256 哈希
-                    _expectedUpdateHash = null;
-                    Match bodyMatch = Regex.Match(jsonResponse, @"""body""\s*:\s*""((?:[^""\\]|\\.)*)""", RegexOptions.Singleline);
-                    if (bodyMatch.Success)
+                    string downloadUrl = asset.BrowserDownloadUrl;
+                    WriteLog($"选定资产: {asset.Name}（{asset.Size} 字节）");
+                    WriteLog($"下载地址: {downloadUrl}");
+
+                    // 从发布说明（body）中提取预期的 SHA256 哈希
+                    _expectedUpdateHash = ReleaseInfoParser.TryExtractExpectedSha256(release.Body);
+                    if (_expectedUpdateHash != null)
                     {
-                        string body = Regex.Unescape(bodyMatch.Groups[1].Value);
-                        Match hashMatch = Regex.Match(body, @"SHA256[:\s]+([A-Fa-f0-9]{64})");
-                        if (hashMatch.Success)
-                        {
-                            _expectedUpdateHash = hashMatch.Groups[1].Value.ToUpperInvariant();
-                            WriteLog($"从发布说明中提取到 SHA256: {_expectedUpdateHash}");
-                        }
-                        else
-                        {
-                            WriteLog("发布说明中未找到 SHA256 哈希，将跳过完整性校验");
-                        }
+                        WriteLog($"从发布说明中提取到 SHA256: {_expectedUpdateHash}");
+                    }
+                    else
+                    {
+                        WriteLog("发布说明中未找到 SHA256 哈希，将仅依赖签名校验");
                     }
 
-                    // 从 URL 中提取文件名（更可靠）
-                    string fileName = Path.GetFileName(new Uri(downloadUrl).LocalPath);
+                    // 从资产名提取文件名（比从 URL 解析更可靠）
+                    string fileName = asset.Name;
                     WriteLog($"提取到文件名: {fileName}");
 
-                    Version latestVersion = ParseVersion(tagName);
+                    Version latestVersion = ReleaseInfoParser.ParseVersion(release.TagName);
                     if (latestVersion == null)
                     {
-                        WriteLog($"无法解析版本号: {tagName}，跳过本次更新检查");
+                        WriteLog($"无法解析版本号: {release.TagName}，跳过本次更新检查");
                         return;
                     }
 
@@ -328,36 +312,6 @@ namespace WindowsFormsApp1
                 UpdateCheckCompleted = true;
                 WriteLog("更新检查完成");
             }
-        }
-
-        /// <summary>
-        /// 解析 GitHub Release 的 tag 为 Version 对象。
-        /// 容忍 "v" 前缀与 "-beta"/"-rc.1" 等预发布后缀，解析失败返回 null 而不抛异常。
-        /// </summary>
-        private static Version ParseVersion(string tagName)
-        {
-            if (string.IsNullOrWhiteSpace(tagName))
-                return null;
-
-            string versionStr = tagName.Trim().TrimStart('v', 'V');
-
-            // 剥离预发布后缀，如 "26.7.0-beta1" -> "26.7.0"
-            int dashIndex = versionStr.IndexOf('-');
-            if (dashIndex > 0)
-                versionStr = versionStr.Substring(0, dashIndex);
-
-            // Version 只接受 "数字[.数字[.数字[.数字]]]"，补足缺失的段
-            string[] parts = versionStr.Split('.');
-            if (parts.Length == 0 || parts.Length > 4)
-                return null;
-
-            foreach (string part in parts)
-            {
-                if (!int.TryParse(part, out _))
-                    return null;
-            }
-
-            return Version.TryParse(versionStr, out Version parsed) ? parsed : null;
         }
 
         /// <summary>
@@ -436,91 +390,167 @@ namespace WindowsFormsApp1
                 }
             }
 
-            WriteLog("下载完成，验证文件完整性...");
+            WriteLog("下载完成，开始验证文件...");
 
             // 验证文件是否为有效的 PE 可执行文件
             if (!IsValidPE(downloadedFile))
             {
-                try { File.Delete(downloadedFile); } catch { }
+                TryDelete(downloadedFile);
                 throw new Exception("下载的文件不是有效的 Windows 可执行文件（PE 头验证失败），更新已取消");
             }
 
-            // 计算并记录 SHA256 哈希
+            // 第一道也是唯一能抵御"仓库被入侵"的关卡：Authenticode 代码签名。
+            // 期望哈希来自同一个 HTTP 响应，攻击者能同时替换文件与哈希，
+            // 只能防下载损坏，防不了恶意篡改。签名才是真正的信任锚。
+            if (!SignatureVerifier.IsAcceptable(downloadedFile, out string signatureInfo))
+            {
+                TryDelete(downloadedFile);
+                throw new Exception("下载的文件未通过签名校验，更新已取消。\n" + signatureInfo);
+            }
+            WriteLog($"签名校验: {signatureInfo}");
+
+            // 辅助校验：SHA256 只能证明文件与说明一致，不代表文件可信
             string actualHash = ComputeSHA256(downloadedFile);
             WriteLog($"下载文件 SHA256: {actualHash}");
 
-            // 如果发布说明中提供了预期哈希，进行比对
             if (!string.IsNullOrEmpty(expectedHash))
             {
                 if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
                 {
-                    try { File.Delete(downloadedFile); } catch { }
+                    TryDelete(downloadedFile);
                     throw new Exception($"文件哈希验证失败！\n期望: {expectedHash}\n实际: {actualHash}\n更新已取消，请检查发布页。");
                 }
-                WriteLog("文件哈希验证通过");
+                WriteLog("哈希校验通过");
             }
             else
             {
-                WriteLog("警告：未提供预期哈希值，跳过完整性校验");
+                WriteLog("未提供预期哈希值，已跳过哈希比对（签名校验为主要依据）");
             }
 
             CreateUpdateScript(updaterScript, currentExe, downloadedFile, newVersion);
             WriteLog("更新脚本创建成功，准备退出主程序，由更新脚本完成后台替换");
 
-            // 先释放互斥体，再启动更新脚本
+            // Environment.Exit 不会执行 finally，必须在此显式释放互斥体，
+            // 否则批处理脚本里的 taskkill 可能杀不掉本进程，导致文件被占用而替换失败
+            ReleaseMutex();
+            Thread.Sleep(200);
 
-            Process.Start(new ProcessStartInfo()
-            {
-                FileName = updaterScript,
-                UseShellExecute = true,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden
-            });
+            ProcessStartInfo updateProcess = CreateUpdateScript(updaterScript, currentExe, downloadedFile, newVersion);
+            Process.Start(updateProcess);
 
             // 退出当前程序，让更新脚本替换文件
-            Environment.Exit(0);
+            Shutdown(0);
+        }
+
+        /// <summary>
+        /// 统一的退出入口。
+        ///
+        /// 直接调用 Environment.Exit 会跳过 Main 的 finally，导致单实例互斥体
+        /// 不被释放——在自更新场景下，批处理脚本 taskkill 杀不掉残留进程，
+        /// exe 文件被占用而替换失败。这里统一先释放资源再退出。
+        /// </summary>
+        public static void Shutdown(int exitCode)
+        {
+            ReleaseMutex();
+            Application.Exit();
+            Environment.Exit(exitCode);
+        }
+
+        /// <summary>尽力删除文件，忽略所有异常</summary>
+        private static void TryDelete(string path)
+        {
+            try { if (File.Exists(path)) File.Delete(path); }
+            catch { }
         }
 
         /// <summary>
         /// 创建更新脚本（批处理文件）- 静默更新，不提示不重启
+        ///
+        /// 路径传递方式：不用字符串插值把路径写进脚本，而是通过环境变量传递。
+        /// 因为用户可能把程序放在任意目录，路径中若含 & % ! " 等字符，
+        /// 直接插入批处理会造成语法破坏甚至命令注入。
+        ///
+        /// 失败保护：替换前先备份旧 exe，复制失败时回滚并重试（有次数上限），
+        /// 避免"旧文件已删、新文件没拷上"导致程序彻底丢失。
         /// </summary>
-        private static void CreateUpdateScript(string scriptPath, string currentExe, string newExe, Version newVersion)
+        private static ProcessStartInfo CreateUpdateScript(string scriptPath, string currentExe, string newExe, Version newVersion)
         {
             string pendingFile = Path.Combine(UPDATE_DIR, "pending.txt");
+            string backupExe = currentExe + ".bak";
             File.WriteAllText(pendingFile, newExe);
 
-            // 生成批处理内容：静默替换文件，不显示任何提示
-            string batchContent = $@"@echo off
-title 正在更新软件...
+            // 全部走 ASCII：批处理默认编码为 GBK，脚本内出现中文会导致解析错乱
+            string batchContent = @"@echo off
+setlocal enabledelayedexpansion
+title Updating
 
-:: 等待主程序完全退出
-timeout /t 2 /nobreak > nul
+set ""TARGET=%SEEWO_TARGET%""
+set ""SOURCE=%SEEWO_SOURCE%""
+set ""BACKUP=%SEEWO_BACKUP%""
+set ""PENDING=%SEEWO_PENDING%""
 
-:: 尝试替换文件（如果被占用就重试）
-:retry
-taskkill /f /im {Path.GetFileName(currentExe)} 2>nul
-timeout /t 1 /nobreak > nul
+:: Give the main process time to fully exit
+ping -n 3 127.0.0.1 > nul
 
-if exist ""{currentExe}"" (
-    del /f /q ""{currentExe}""
-    if errorlevel 1 (
-        timeout /t 2 /nobreak > nul
-        goto retry
-    )
+:: Kill any lingering instance
+taskkill /f /im ""%~nx1"" > nul 2>&1
+ping -n 2 127.0.0.1 > nul
+
+:: Back up current executable
+if exist ""%TARGET%"" copy /y ""%TARGET%"" ""%BACKUP%"" > nul
+
+:: Replace with retries (bounded, never loop forever)
+set /a ATTEMPT=0
+:copyloop
+set /a ATTEMPT+=1
+if !ATTEMPT! GTR 5 goto :copyfailed
+
+del /f /q ""%TARGET%"" > nul 2>&1
+copy /y ""%SOURCE%"" ""%TARGET%"" > nul 2>&1
+
+if exist ""%TARGET%"" goto :success
+ping -n 2 127.0.0.1 > nul
+goto :copyloop
+
+:copyfailed
+:: Restore backup so the program is not left missing
+if exist ""%BACKUP%"" (
+    copy /y ""%BACKUP%"" ""%TARGET%"" > nul 2>&1
+    del /f /q ""%BACKUP%"" > nul 2>&1
 )
+echo UPDATE_FAILED > ""%PENDING%""
+del /f /q ""%SOURCE%"" > nul 2>&1
+exit /b 1
 
-:: 复制新文件
-copy /y ""{newExe}"" ""{currentExe}""
+:success
+:: Verify the new file is a real PE binary
+set /a SIZE=0
+for %%F in (""%TARGET%"") do set /a SIZE=%%~zF
+if !SIZE! LSS 1024 goto :copyfailed
 
-:: 清理临时文件
-del /f /q ""{newExe}"" 2>nul
-del /f /q ""{pendingFile}"" 2>nul
-del /f /q ""%~f0"" 2>nul
-
-exit
+del /f /q ""%SOURCE%"" > nul 2>&1
+del /f /q ""%BACKUP%"" > nul 2>&1
+del /f /q ""%PENDING%"" > nul 2>&1
+del /f /q ""%~f0"" > nul 2>&1
+exit /b 0
 ";
             File.WriteAllText(scriptPath, batchContent);
             WriteLog($"更新脚本已创建: {scriptPath}");
+
+            // 启动脚本时通过环境变量传递路径，避免路径中的特殊字符破坏批处理语法
+            var psi = new ProcessStartInfo
+            {
+                FileName = scriptPath,
+                UseShellExecute = true,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            psi.EnvironmentVariables["SEEWO_TARGET"] = currentExe;
+            psi.EnvironmentVariables["SEEWO_SOURCE"] = newExe;
+            psi.EnvironmentVariables["SEEWO_BACKUP"] = backupExe;
+            psi.EnvironmentVariables["SEEWO_PENDING"] = pendingFile;
+
+            return psi;
         }
 
         private static Assembly CurrentDomain_AssemblyResolve(object sender, ResolveEventArgs args)
@@ -657,20 +687,10 @@ exit
             }
         }
 
-        // 日志写入开关。卸载流程会删除日志目录，必须先置为 false 停写，
-        // 否则后续所有 WriteLog 调用会因目录已删而静默失败。
-        public static volatile bool LoggingEnabled = true;
-
+        // 日志统一委托给 LogService，本类保留同名包装以免改动所有调用点。
         private static void WriteLog(string message)
         {
-            if (!LoggingEnabled) return;
-            try
-            {
-                string logDir = Path.GetDirectoryName(LogFilePath);
-                if (!string.IsNullOrEmpty(logDir)) Directory.CreateDirectory(logDir);
-                File.AppendAllText(LogFilePath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} - {message}\n");
-            }
-            catch { }
+            LogService.Write(message);
         }
     }
 }

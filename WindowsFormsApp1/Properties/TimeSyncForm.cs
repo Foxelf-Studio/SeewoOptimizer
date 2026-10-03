@@ -10,6 +10,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
+using SeewoOpt.Services;
 using WindowsFormsApp1;
 using Microsoft.VisualBasic;
 
@@ -69,7 +70,6 @@ namespace TimeSyncTool
             set { _killWps = value; }
         }
 
-        private const string SETTINGS_REGISTRY_PATH = @"Software\TimeSyncTool";
         private const string TASK_NAME = "TimeSyncTool";
 
         // Windows API 用于设置系统时间
@@ -240,7 +240,7 @@ namespace TimeSyncTool
                 WriteLog($"构造函数异常：{ex}");
                 string errorMsg = $"初始化失败：{ex.Message}\n\n程序将关闭。";
                 MessageBox.Show(errorMsg, "致命错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                Environment.Exit(1);
+                Program.Shutdown(1);
             }
         }
 
@@ -469,13 +469,7 @@ namespace TimeSyncTool
 
         private void WriteLog(string message)
         {
-            if (!Program.LoggingEnabled) return;
-            try
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(Program.LogFilePath));
-                File.AppendAllText(Program.LogFilePath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {message}\n");
-            }
-            catch { }
+            LogService.Write(message);
         }
 
         private void EnsureAutoStartConsistency()
@@ -857,7 +851,7 @@ namespace TimeSyncTool
                                 Process.Start(startInfo);
                             }
                             catch { }
-                            Environment.Exit(0);
+                            Program.Shutdown(0);
                         }
 
                         UpdateButton(true);
@@ -1236,48 +1230,29 @@ namespace TimeSyncTool
 
         private void LoadSettings()
         {
-            try
-            {
-                using (var key = Registry.CurrentUser.CreateSubKey(SETTINGS_REGISTRY_PATH))
-                {
-                    object val = key.GetValue("AutoStart", true);
-                    _autoStart = val is bool ? (bool)val : Convert.ToBoolean(val);
+            // 读取与容错已下沉到 SettingsStore，此处只负责把结果映射到界面状态
+            AppSettings settings = SettingsStore.Load();
 
-                    val = key.GetValue("SilentStart", false);
-                    _silentStart = val is bool ? (bool)val : Convert.ToBoolean(val);
-
-                    val = key.GetValue("AutoVolume", true);
-                    _autoVolume = val is bool ? (bool)val : Convert.ToBoolean(val);
-
-                    val = key.GetValue("VolumeLevel", 60);
-                    _volumeLevel = val is int ? (int)val : Convert.ToInt32(val);
-
-                    val = key.GetValue("KillWps", true);
-                    _killWps = val is bool ? (bool)val : Convert.ToBoolean(val);
-                }
-            }
-            catch
-            {
-                _autoStart = true;
-                _silentStart = false;
-                _autoVolume = true;
-                _volumeLevel = 60;
-                _killWps = true;
-            }
+            _autoStart = settings.AutoStart;
+            _silentStart = settings.SilentStart;
+            _autoVolume = settings.AutoVolume;
+            _volumeLevel = settings.VolumeLevel;
+            _killWps = settings.KillWps;
         }
 
         public void SaveSettings()
         {
             try
             {
-                using (var key = Registry.CurrentUser.CreateSubKey(SETTINGS_REGISTRY_PATH))
+                SettingsStore.Save(new AppSettings
                 {
-                    key.SetValue("AutoStart", _autoStart);
-                    key.SetValue("SilentStart", _silentStart);
-                    key.SetValue("AutoVolume", _autoVolume);
-                    key.SetValue("VolumeLevel", _volumeLevel);
-                    key.SetValue("KillWps", _killWps);
-                }
+                    AutoStart = _autoStart,
+                    SilentStart = _silentStart,
+                    AutoVolume = _autoVolume,
+                    VolumeLevel = _volumeLevel,
+                    KillWps = _killWps
+                });
+
                 UpdateAutoStartTask();
             }
             catch (Exception ex)
@@ -1402,7 +1377,7 @@ namespace TimeSyncTool
 
             // 停止所有日志写入。日志目录即将被删除，若继续写入，
             // 后续 WriteLog 会因目录不存在而静默失败，导致日志永久丢失。
-            Program.LoggingEnabled = false;
+            LogService.Enabled = false;
 
             // 1. 删除日志目录
             try
@@ -1451,14 +1426,8 @@ namespace TimeSyncTool
             // 3. 删除注册表项
             try
             {
-                using (var key = Registry.CurrentUser.OpenSubKey("Software", true))
-                {
-                    if (key != null)
-                    {
-                        key.DeleteSubKeyTree("TimeSyncTool", false);
-                        AddLog("√ 已删除注册表项: HKCU\\Software\\TimeSyncTool\n", Color.Green);
-                    }
-                }
+                SettingsStore.Delete();
+                AddLog("√ 已删除注册表项: HKCU\\Software\\TimeSyncTool\n", Color.Green);
             }
             catch (Exception ex)
             {
@@ -1523,13 +1492,13 @@ namespace TimeSyncTool
                 }
 
                 // 强制终止进程，避免任何残留
-                Environment.Exit(0);
+                Program.Shutdown(0);
             }
             else
             {
                 // 用户选择继续使用：日志目录已被删除，重新开启写入会自动重建，
                 // 否则本次会话剩余时间将完全没有日志。
-                Program.LoggingEnabled = true;
+                LogService.Enabled = true;
             }
         }
 
