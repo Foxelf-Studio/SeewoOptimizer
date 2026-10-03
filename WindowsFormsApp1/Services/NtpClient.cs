@@ -141,19 +141,27 @@ namespace SeewoOpt.Services
 
                 DateTime utcTime = ParseTimestamp(packet, 40);
 
-                // 合理性下限校验。
-                // 引入本项目时曾因时间戳纪元处理错误，把 2026 年解析成 1956 年，
-                // 而协议层校验（Mode/Stratum/LI）全部通过，故障静默且难以察觉。
-                // 这里加一道与本机当前时间的偏差检查，使同类错误必然暴露。
-                // 下限取 2000-01-01：本工具面向教室场景，真实时间不可能早于此；
-                // 上限取本机时间 +1 天，容忍各服务器间的正常差异与轻微时钟漂移。
+                // 合理性校验：只用绝对边界，绝不与本机时钟比较。
+                //
+                // 设计教训：此校验最初写成"上限 = DateTime.UtcNow.AddDays(1)"，
+                // 结果本机时间被设为 2000-01-01 时（这正是本工具要修正的典型场景），
+                // 服务器返回的真实时间被判为"超出范围"而全部拒绝，
+                // 等于把工具的核心功能堵死。用本机时钟判断 NTP 时间是循环论证——
+                // 正因为本机时钟不准才需要校时。
+                //
+                // 边界取自协议本身而非本机状态：
+                //   下限 2000-01-01：能拦住纪元处理错误造成的 1956/1970 等畸形值，
+                //     同时不会误伤任何真实服务器。
+                //   上限 2036-02-07 06:28:16：NTP era 0 的理论终点（2^32 秒）。
+                //     32 位秒字段无法表达更晚的时间——真到那时需启用 era 1，
+                //     当前实现未支持，因此明确拒绝好过静默解析出错误时间。
                 DateTime earliest = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-                DateTime latest = DateTime.UtcNow.AddDays(1);
+                DateTime latest = new DateTime(2036, 2, 7, 6, 28, 16, DateTimeKind.Utc);
 
                 if (utcTime < earliest || utcTime > latest)
                 {
                     result.ValidationError = string.Format(
-                        "服务器时间 {0:yyyy-MM-dd HH:mm:ss} 超出合理范围（允许 {1:yyyy-MM-dd} ~ {2:yyyy-MM-dd}），解析可能有误",
+                        "服务器时间 {0:yyyy-MM-dd HH:mm:ss} 超出可接受范围（{1:yyyy-MM-dd} ~ {2:yyyy-MM-dd}），解析可能有误",
                         utcTime, earliest, latest);
                     return result;
                 }
