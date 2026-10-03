@@ -21,10 +21,12 @@ namespace TimeSyncTool
         private NotifyIcon trayIcon;
         private ContextMenuStrip trayMenu;
         private Thread syncThread;
-        private bool syncCompleted = false;
-        private bool isSyncing = false;
-        private bool forceExit = false;          // 强制退出标志
-        private bool isPermissionError = false;  // 权限错误标志
+        // 跨线程共享状态：以下字段在 UI 线程与 syncThread 之间双向读写，
+        // 必须声明为 volatile，否则 JIT 可能缓存寄存器值导致退出/完成信号无法及时生效。
+        private volatile bool syncCompleted = false;
+        private volatile bool isSyncing = false;
+        private volatile bool forceExit = false;          // 强制退出标志
+        private volatile bool isPermissionError = false;  // 权限错误标志
 
         // 设置字段（与属性对应）
         private bool _autoStart = false;
@@ -467,6 +469,7 @@ namespace TimeSyncTool
 
         private void WriteLog(string message)
         {
+            if (!Program.LoggingEnabled) return;
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(Program.LogFilePath));
@@ -1397,6 +1400,10 @@ namespace TimeSyncTool
 
             bool success = true;
 
+            // 停止所有日志写入。日志目录即将被删除，若继续写入，
+            // 后续 WriteLog 会因目录不存在而静默失败，导致日志永久丢失。
+            Program.LoggingEnabled = false;
+
             // 1. 删除日志目录
             try
             {
@@ -1517,6 +1524,12 @@ namespace TimeSyncTool
 
                 // 强制终止进程，避免任何残留
                 Environment.Exit(0);
+            }
+            else
+            {
+                // 用户选择继续使用：日志目录已被删除，重新开启写入会自动重建，
+                // 否则本次会话剩余时间将完全没有日志。
+                Program.LoggingEnabled = true;
             }
         }
 

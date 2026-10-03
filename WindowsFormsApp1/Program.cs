@@ -26,8 +26,9 @@ namespace WindowsFormsApp1
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "TimeSyncTool", "updates");
 
-        // 更新完成标志
-        public static bool UpdateCheckCompleted = false;
+        // 更新完成标志（由后台更新线程写、UI 线程读，必须 volatile，
+        // 否则 UI 侧 Timer 可能读到缓存值导致窗口一直卡在托盘不退出）
+        public static volatile bool UpdateCheckCompleted = false;
 
         // 更新检测事件（用于通知 TimeSyncForm 显示气泡）
         public static event Action<string, string> UpdateDetected;
@@ -60,8 +61,8 @@ namespace WindowsFormsApp1
                 // 程序集解析事件（必须在加载任何外部程序集前注册）
                 AppDomain.CurrentDomain.AssemblyResolve += CurrentDomain_AssemblyResolve;
 
-                // 确保必需的 DLL 存在（必须在异步更新检查之前，否则 Newtonsoft.Json 缺失）
-                EnsureRequiredDllsExist();
+        // 确保必需的 DLL 存在（必须在异步更新检查之前，否则任务计划库加载失败）
+        EnsureRequiredDllsExist();
 
                 // 异步检查新版本（不阻塞主线程）
                 Task.Run(() => CheckForUpdatesAsync()).ContinueWith(t =>
@@ -291,8 +292,12 @@ namespace WindowsFormsApp1
                     string fileName = Path.GetFileName(new Uri(downloadUrl).LocalPath);
                     WriteLog($"提取到文件名: {fileName}");
 
-                    string versionStr = tagName.TrimStart('v');
-                    Version latestVersion = new Version(versionStr);
+                    Version latestVersion = ParseVersion(tagName);
+                    if (latestVersion == null)
+                    {
+                        WriteLog($"无法解析版本号: {tagName}，跳过本次更新检查");
+                        return;
+                    }
 
                     WriteLog($"GitHub 最新版本: {latestVersion}");
 
@@ -323,6 +328,36 @@ namespace WindowsFormsApp1
                 UpdateCheckCompleted = true;
                 WriteLog("更新检查完成");
             }
+        }
+
+        /// <summary>
+        /// 解析 GitHub Release 的 tag 为 Version 对象。
+        /// 容忍 "v" 前缀与 "-beta"/"-rc.1" 等预发布后缀，解析失败返回 null 而不抛异常。
+        /// </summary>
+        private static Version ParseVersion(string tagName)
+        {
+            if (string.IsNullOrWhiteSpace(tagName))
+                return null;
+
+            string versionStr = tagName.Trim().TrimStart('v', 'V');
+
+            // 剥离预发布后缀，如 "26.7.0-beta1" -> "26.7.0"
+            int dashIndex = versionStr.IndexOf('-');
+            if (dashIndex > 0)
+                versionStr = versionStr.Substring(0, dashIndex);
+
+            // Version 只接受 "数字[.数字[.数字[.数字]]]"，补足缺失的段
+            string[] parts = versionStr.Split('.');
+            if (parts.Length == 0 || parts.Length > 4)
+                return null;
+
+            foreach (string part in parts)
+            {
+                if (!int.TryParse(part, out _))
+                    return null;
+            }
+
+            return Version.TryParse(versionStr, out Version parsed) ? parsed : null;
         }
 
         /// <summary>
@@ -622,8 +657,13 @@ exit
             }
         }
 
+        // 日志写入开关。卸载流程会删除日志目录，必须先置为 false 停写，
+        // 否则后续所有 WriteLog 调用会因目录已删而静默失败。
+        public static volatile bool LoggingEnabled = true;
+
         private static void WriteLog(string message)
         {
+            if (!LoggingEnabled) return;
             try
             {
                 string logDir = Path.GetDirectoryName(LogFilePath);
