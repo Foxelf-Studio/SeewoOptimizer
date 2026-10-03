@@ -995,6 +995,12 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
         private static void HandleRetry(ref int retryCount, string errorMessage, int maxRetries)
         {
             retryCount++;
+
+            // 修正记录：errorMessage 原先被接收后直接丢弃，
+            // 导致"设置系统时间失败"之类的关键错误在日志中完全不可见，
+            // 排查时只能看到"NTP 响应有效"却不知下一步为何失败。
+            LogService.Write($"  第 {retryCount} 次尝试失败: {errorMessage}");
+
             if (retryCount <= maxRetries)
                 Thread.Sleep(RETRY_DELAY_MS);
         }

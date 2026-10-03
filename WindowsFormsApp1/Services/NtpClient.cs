@@ -139,7 +139,26 @@ namespace SeewoOpt.Services
                     return result;
                 }
 
-                result.UtcTime = ParseTimestamp(packet, 40);
+                DateTime utcTime = ParseTimestamp(packet, 40);
+
+                // 合理性下限校验。
+                // 引入本项目时曾因时间戳纪元处理错误，把 2026 年解析成 1956 年，
+                // 而协议层校验（Mode/Stratum/LI）全部通过，故障静默且难以察觉。
+                // 这里加一道与本机当前时间的偏差检查，使同类错误必然暴露。
+                // 下限取 2000-01-01：本工具面向教室场景，真实时间不可能早于此；
+                // 上限取本机时间 +1 天，容忍各服务器间的正常差异与轻微时钟漂移。
+                DateTime earliest = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                DateTime latest = DateTime.UtcNow.AddDays(1);
+
+                if (utcTime < earliest || utcTime > latest)
+                {
+                    result.ValidationError = string.Format(
+                        "服务器时间 {0:yyyy-MM-dd HH:mm:ss} 超出合理范围（允许 {1:yyyy-MM-dd} ~ {2:yyyy-MM-dd}），解析可能有误",
+                        utcTime, earliest, latest);
+                    return result;
+                }
+
+                result.UtcTime = utcTime;
                 result.IsValid = true;
             }
             catch (Exception ex)
@@ -163,12 +182,20 @@ namespace SeewoOpt.Services
                             | (ulong)data[offset + 6] << 8
                             | data[offset + 7];
 
-            // NTP 时间戳是从 1900-01-01 起算的，DateTime 从 0001 起算
-            long seconds = (long)intPart - NtpProtocol.NtpEpochOffsetSeconds;
+            // NTP 时间戳本身就是从 1900-01-01 起算的秒数，
+            // 因此基准也用 1900-01-01，不能再减 Unix 纪元偏移。
+            //
+            // 修正记录：此处在重构时曾写成
+            //   seconds = intPart - NtpEpochOffsetSeconds; 配 1900 基准
+            // 等于把纪元偏移减了两次，解析结果比真实时间早 70 年
+            // （日志表现为 "UTC 1956-10-03" 而时刻是对的）。
+            // 两种正确写法二选一：
+            //   A. intPart 原值 + 1900 基准
+            //   B. intPart - 纪元偏移 + 1970 基准
             long milliseconds = (long)((fractPart * 1000) >> 32);
 
             return new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Utc)
-                .AddSeconds(seconds)
+                .AddSeconds((long)intPart)
                 .AddMilliseconds(milliseconds);
         }
 
