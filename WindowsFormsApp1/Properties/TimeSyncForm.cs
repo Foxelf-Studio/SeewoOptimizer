@@ -1,13 +1,8 @@
-﻿using Microsoft.Win32;
-using Microsoft.Win32.TaskScheduler;
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
-using System.Net;
-using System.Net.Sockets;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 using SeewoOpt.Services;
@@ -26,8 +21,21 @@ namespace TimeSyncTool
         // 必须声明为 volatile，否则 JIT 可能缓存寄存器值导致退出/完成信号无法及时生效。
         private volatile bool syncCompleted = false;
         private volatile bool isSyncing = false;
-        private volatile bool forceExit = false;          // 强制退出标志
         private volatile bool isPermissionError = false;  // 权限错误标志
+
+        // 取消令牌：替代原先的 volatile bool forceExit。
+        // 原实现用 Thread.Sleep + 轮询标志实现"可取消的等待"，
+        // 问题是：用户点退出后，最多要等 sleep 结束（最长 5 秒）才会响应。
+        // 改为 CancellationToken 后，等待可被立即打断，退出响应从秒级降到毫秒级。
+        private CancellationTokenSource _syncCts;
+        private bool IsSyncCancelled
+        {
+            get
+            {
+                CancellationTokenSource cts = _syncCts;
+                return cts != null && cts.IsCancellationRequested;
+            }
+        }
 
         // 设置字段（与属性对应）
         private bool _autoStart = false;
@@ -70,113 +78,16 @@ namespace TimeSyncTool
             set { _killWps = value; }
         }
 
-        private const string TASK_NAME = "TimeSyncTool";
-
-        // Windows API 用于设置系统时间
-        [StructLayout(LayoutKind.Sequential)]
-        public struct SYSTEMTIME
-        {
-            public short wYear;
-            public short wMonth;
-            public short wDayOfWeek;
-            public short wDay;
-            public short wHour;
-            public short wMinute;
-            public short wSecond;
-            public short wMilliseconds;
-        }
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool SetLocalTime(ref SYSTEMTIME st);
-
-        [DllImport("kernel32.dll")]
-        public static extern uint GetLastError();
-
-        // Core Audio API for volume control
-        [ComImport]
-        [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
-        internal class MMDeviceEnumerator { }
-
-        internal enum EDataFlow
-        {
-            eRender,
-            eCapture,
-            eAll,
-            EDataFlow_enum_count
-        }
-
-        internal enum ERole
-        {
-            eConsole,
-            eMultimedia,
-            eCommunications,
-            ERole_enum_count
-        }
-
-        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6")]
-        internal interface IMMDeviceEnumerator
-        {
-            int NotImpl1();
-            [PreserveSig]
-            int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice ppDevice);
-        }
-
-        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        [Guid("D666063F-1587-4E43-81F1-B948E807363F")]
-        internal interface IMMDevice
-        {
-            [PreserveSig]
-            int Activate([MarshalAs(UnmanagedType.LPStruct)] Guid iid, int dwClsCtx, IntPtr pActivationParams, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
-        }
-
-        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        [Guid("5CDF2C82-841E-4546-9722-0CF74078229A")]
-        internal interface IAudioEndpointVolume
-        {
-            [PreserveSig]
-            int RegisterControlChangeNotify(IntPtr pNotify);
-            [PreserveSig]
-            int UnregisterControlChangeNotify(IntPtr pNotify);
-            [PreserveSig]
-            int GetChannelCount(out int pnChannelCount);
-            [PreserveSig]
-            int SetMasterVolumeLevel(float fLevelDB, Guid pguidEventContext);
-            [PreserveSig]
-            int SetMasterVolumeLevelScalar(float fLevel, Guid pguidEventContext);
-            [PreserveSig]
-            int GetMasterVolumeLevel(out float pfLevelDB);
-            [PreserveSig]
-            int GetMasterVolumeLevelScalar(out float pfLevel);
-            [PreserveSig]
-            int SetChannelVolumeLevel(uint nChannel, float fLevelDB, Guid pguidEventContext);
-            [PreserveSig]
-            int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, Guid pguidEventContext);
-            [PreserveSig]
-            int GetChannelVolumeLevel(uint nChannel, out float pfLevelDB);
-            [PreserveSig]
-            int GetChannelVolumeLevelScalar(uint nChannel, out float pfLevel);
-            [PreserveSig]
-            int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, Guid pguidEventContext);
-            [PreserveSig]
-            int GetMute(out bool pbMute);
-            [PreserveSig]
-            int GetVolumeStepInfo(out uint pnStep, out uint pnStepCount);
-            [PreserveSig]
-            int VolumeStepUp(Guid pguidEventContext);
-            [PreserveSig]
-            int VolumeStepDown(Guid pguidEventContext);
-            [PreserveSig]
-            int QueryHardwareSupport(out uint pdwHardwareSupportMask);
-            [PreserveSig]
-            int GetVolumeRange(out float pflVolumeMindB, out float pflVolumeMaxdB, out float pflVolumeIncrementdB);
-        }
-
         private const int MAX_RETRIES = 3;
         private const int SECOND_STAGE_RETRIES = 3;
         private const int RETRY_DELAY_MS = 2000;
         private const int FINAL_FAILURE_DELAY_MS = 5000;
         private const int STAGE_DISPLAY_DELAY_MS = 2000;
+        private const int SERVER_SWITCH_DELAY_MS = 1000;
+
+        // 前 4 个为主要服务器，全部失败后才启用备用服务器。
+        // 原代码用字面量 4 与 i-3 表达这个阶段划分，容易看错，现提取为常量。
+        private const int PRIMARY_SERVER_COUNT = 4;
 
         // 定义多个NTP服务器
         private static readonly string[] NtpServers = {
@@ -476,21 +387,15 @@ namespace TimeSyncTool
         {
             try
             {
-                bool taskExists = false;
-                using (TaskService ts = new TaskService())
-                {
-                    taskExists = ts.GetTask(TASK_NAME) != null;
-                }
-                WriteLog($"当前任务计划自启项存在：{taskExists}，设置值为：{_autoStart}");
-                if (taskExists != _autoStart)
-                {
-                    WriteLog($"不一致，执行同步");
-                    UpdateAutoStartTask();
-                }
+                AutoStartResult result = AutoStartService.EnsureConsistency(
+                    _autoStart, Application.ExecutablePath);
+
+                WriteLog("EnsureAutoStartConsistency: " + result.Detail
+                    + (result.Success ? "" : " (失败: " + result.ErrorMessage + ")"));
             }
             catch (Exception ex)
             {
-                WriteLog($"EnsureAutoStartConsistency 异常：{ex}");
+                WriteLog("EnsureAutoStartConsistency 异常：" + ex);
             }
         }
 
@@ -503,7 +408,7 @@ namespace TimeSyncTool
 
                 if (result == DialogResult.Yes)
                 {
-                    forceExit = true;
+                    CancelSync();
                     syncCompleted = true;
 
                     if (syncThread != null && syncThread.IsAlive)
@@ -523,7 +428,7 @@ namespace TimeSyncTool
             }
             else
             {
-                forceExit = true;
+                CancelSync();
                 syncCompleted = true;
                 if (trayIcon != null)
                 {
@@ -570,7 +475,7 @@ namespace TimeSyncTool
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
-            if (forceExit || isPermissionError || syncCompleted)
+            if (IsSyncCancelled || isPermissionError || syncCompleted)
             {
                 if (trayIcon != null)
                 {
@@ -654,6 +559,46 @@ namespace TimeSyncTool
             }
         }
 
+        /// <summary>
+        /// 可被取消的等待。原先用 Thread.Sleep + 轮询 forceExit，
+        /// 用户点退出后最长要等 5 秒才响应；现在取消后立即返回 true。
+        /// </summary>
+        private bool WaitOrCancel(int milliseconds)
+        {
+            if (IsSyncCancelled) return true;
+
+            try
+            {
+                return _syncCts.Token.WaitHandle.WaitOne(milliseconds);
+            }
+            catch (ObjectDisposedException)
+            {
+                // CTS 已被释放，说明流程已结束
+                return true;
+            }
+        }
+
+        /// <summary>请求取消同步流程。可从任意线程调用，立即生效。</summary>
+        private void CancelSync()
+        {
+            try
+            {
+                _syncCts?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // CTS 已被释放，说明流程已结束，忽略
+            }
+        }
+
+        /// <summary>同步被取消时写日志并返回</summary>
+        private bool AbortIfCancelled(string stage)
+        {
+            if (!IsSyncCancelled) return false;
+            WriteLog("同步被用户取消" + (string.IsNullOrEmpty(stage) ? "" : "（" + stage + "）"));
+            return true;
+        }
+
         private void StartSyncProcess()
         {
             WriteLog("StartSyncProcess 被调用");
@@ -662,6 +607,10 @@ namespace TimeSyncTool
             isSyncing = true;
             syncCompleted = false;
             isPermissionError = false;
+
+            // 每次同步开始都重建 CTS，保证上一轮的取消状态不残留
+            if (_syncCts != null) { try { _syncCts.Dispose(); } catch { } }
+            _syncCts = new CancellationTokenSource();
 
             UpdateButton(false);
 
@@ -684,11 +633,10 @@ namespace TimeSyncTool
                     if (AutoVolume)
                     {
                         WriteLog("开始音量调节");
-                        float targetVolume = VolumeLevel / 100.0f;
                         UpdateStatus($"正在调节系统音量至 {VolumeLevel}%...", Color.DarkBlue);
                         AddLog($"正在调节系统音量至 {VolumeLevel}%... ", Color.Black);
 
-                        bool volumeSet = SetSystemVolume(targetVolume);
+                        bool volumeSet = VolumeController.SetMasterVolumePercent(VolumeLevel);
                         if (volumeSet)
                         {
                             AddLog("√ 完成\n", Color.Green);
@@ -712,7 +660,21 @@ namespace TimeSyncTool
                         UpdateStatus("正在结束WPS进程...", Color.DarkBlue);
                         AddLog("\n正在结束WPS相关进程... ", Color.Black);
 
-                        int killedCount = KillWpsProcesses();
+                        // ProcessCleaner 逐个回调进度，界面只负责显示
+                        int killedCount = ProcessCleaner.KillWpsProcesses(r =>
+                        {
+                            if (r.ProcessId == 0)
+                            {
+                                AddLog($"× {r.ProcessName}: {r.Message}\n", Color.Red);
+                            }
+                            else
+                            {
+                                AddLog($"结束进程: {r.ProcessName} (ID: {r.ProcessId})... ", Color.DarkGray);
+                                AddLog(r.Success ? "√ 成功\n" : $"× {r.Message}\n",
+                                       r.Success ? Color.Green : Color.Red);
+                            }
+                        });
+
                         if (killedCount > 0)
                         {
                             AddLog($"√ 完成 (已结束 {killedCount} 个WPS进程)\n", Color.Green);
@@ -740,19 +702,19 @@ namespace TimeSyncTool
                     UpdateStatus("第一阶段: 主要时间服务器", Color.DarkCyan);
                     AddLog("\n第一阶段: 主要时间服务器\n", Color.DarkCyan);
 
-                    for (int i = 0; i < 4 && !success && !adminPermissionError; i++)
+                    for (int i = 0; i < PRIMARY_SERVER_COUNT && !success && !adminPermissionError; i++)
                     {
-                        if (forceExit) { WriteLog("同步被用户取消（第一阶段）"); return; }
+                        if (AbortIfCancelled("第一阶段")) return;
                         WriteLog($"尝试服务器 {i + 1}: {NtpServers[i]}");
-                        UpdateStatus($"尝试服务器 {i + 1}/4: {NtpServers[i]}", Color.DarkBlue);
-                        AddLog($"尝试服务器 {i + 1}/4: {NtpServers[i]}\n", Color.Black);
-                        success = SyncTimeWithServer(NtpServers[i], ref adminPermissionError, false, i + 1, 4);
+                        UpdateStatus($"尝试服务器 {i + 1}/{PRIMARY_SERVER_COUNT}: {NtpServers[i]}", Color.DarkBlue);
+                        AddLog($"尝试服务器 {i + 1}/{PRIMARY_SERVER_COUNT}: {NtpServers[i]}\n", Color.Black);
+                        success = SyncTimeWithServer(NtpServers[i], ref adminPermissionError, false);
 
-                        if (!success && !adminPermissionError && i < 3)
+                        if (!success && !adminPermissionError && i < PRIMARY_SERVER_COUNT - 1)
                         {
                             AddLog($"\n{new string('-', 40)}\n", Color.DarkGray);
                             AddLog("尝试下一个服务器...\n", Color.DarkGray);
-                            Thread.Sleep(1000);
+                            if (WaitOrCancel(SERVER_SWITCH_DELAY_MS)) return;
                         }
                     }
 
@@ -764,28 +726,27 @@ namespace TimeSyncTool
                         AddLog("第一阶段同步失败，启动备用服务器\n", Color.DarkOrange);
                         AddLog(new string('=', 60) + "\n", Color.DarkOrange);
 
-                        if (forceExit) { WriteLog("同步被用户取消"); return; }
-                        Thread.Sleep(STAGE_DISPLAY_DELAY_MS);
+                        if (AbortIfCancelled(null)) return;
+                        if (WaitOrCancel(STAGE_DISPLAY_DELAY_MS)) return;
 
-                        if (forceExit) { WriteLog("同步被用户取消"); return; }
                         UpdateStatus("第二阶段: 备用时间服务器", Color.DarkCyan);
                         AddLog("第二阶段: 备用时间服务器\n", Color.DarkCyan);
 
-                        int totalSecondStage = NtpServers.Length - 4;
-                        for (int i = 4; i < NtpServers.Length && !success && !adminPermissionError; i++)
+                        int totalSecondStage = NtpServers.Length - PRIMARY_SERVER_COUNT;
+                        for (int i = PRIMARY_SERVER_COUNT; i < NtpServers.Length && !success && !adminPermissionError; i++)
                         {
-                            if (forceExit) { WriteLog("同步被用户取消（第二阶段）"); return; }
-                            int attemptNumber = i - 3;
+                            if (AbortIfCancelled("第二阶段")) return;
+                            int attemptNumber = i - PRIMARY_SERVER_COUNT + 1;
                             WriteLog($"尝试备用服务器 {attemptNumber}: {NtpServers[i]}");
                             UpdateStatus($"尝试备用服务器 {attemptNumber}/{totalSecondStage}: {NtpServers[i]}", Color.DarkBlue);
                             AddLog($"尝试备用服务器 {attemptNumber}/{totalSecondStage}: {NtpServers[i]}\n", Color.Black);
-                            success = SyncTimeWithServer(NtpServers[i], ref adminPermissionError, true, attemptNumber, totalSecondStage);
+                            success = SyncTimeWithServer(NtpServers[i], ref adminPermissionError, true);
 
                             if (!success && !adminPermissionError && i < NtpServers.Length - 1)
                             {
                                 AddLog($"\n{new string('-', 40)}\n", Color.DarkGray);
                                 AddLog("尝试下一个备用服务器...\n", Color.DarkGray);
-                                Thread.Sleep(1000);
+                                if (WaitOrCancel(SERVER_SWITCH_DELAY_MS)) return;
                             }
                         }
                     }
@@ -802,8 +763,7 @@ namespace TimeSyncTool
                         if (trayIcon != null)
                             trayIcon.ShowBalloonTip(3000, "时间同步完成", "系统时间已成功同步！后台更新检测中...", ToolTipIcon.Info);
 
-                        if (!forceExit) Thread.Sleep(2000);
-                        if (forceExit) { WriteLog("同步被用户取消"); return; }
+                        if (WaitOrCancel(2000)) return;
                         this.Invoke(new MethodInvoker(() => MinimizeToTray()));
 
                         this.Invoke(new MethodInvoker(() =>
@@ -866,7 +826,7 @@ namespace TimeSyncTool
                         AddLog($"\n（悲报！） 经过 {NtpServers.Length} 个服务器的尝试后，时间同步失败。\n", Color.DarkRed);
                         AddLog($"程序将在 {FINAL_FAILURE_DELAY_MS / 1000} 秒后自动关闭...\n", Color.DarkRed);
 
-                        if (!forceExit) Thread.Sleep(FINAL_FAILURE_DELAY_MS);
+                        WaitOrCancel(FINAL_FAILURE_DELAY_MS);
                         syncCompleted = true;
                         this.Invoke(new MethodInvoker(this.Close));
                     }
@@ -901,47 +861,6 @@ namespace TimeSyncTool
 
             syncThread.IsBackground = true;
             syncThread.Start();
-        }
-
-        private int KillWpsProcesses()
-        {
-            int killedCount = 0;
-            try
-            {
-                string[] wpsProcessNames = { "wps", "wpp", "et", "wpscloudsvr", "ksolaunch" };
-
-                foreach (string processName in wpsProcessNames)
-                {
-                    Process[] processes = Process.GetProcessesByName(processName);
-                    foreach (Process process in processes)
-                    {
-                        try
-                        {
-                            AddLog($"结束进程: {process.ProcessName} (ID: {process.Id})... ", Color.DarkGray);
-                            process.Kill();
-                            process.WaitForExit(3000);
-                            if (process.HasExited)
-                            {
-                                AddLog("√ 成功\n", Color.Green);
-                                killedCount++;
-                            }
-                            else
-                            {
-                                AddLog("× 超时\n", Color.Red);
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            AddLog($"× 失败: {ex.Message}\n", Color.Red);
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                AddLog($"结束WPS进程时发生错误: {ex.Message}\n", Color.Red);
-            }
-            return killedCount;
         }
 
         private void UpdateStatus(string text, Color color)
@@ -1021,46 +940,7 @@ namespace TimeSyncTool
             logTextBox.Refresh();
 
         }
-
-        private static bool SetSystemVolume(float volumeLevel)
-        {
-            IMMDeviceEnumerator enumerator = null;
-            IMMDevice device = null;
-            IAudioEndpointVolume volume = null;
-            try
-            {
-                if (volumeLevel < 0.0f || volumeLevel > 1.0f)
-                    return false;
-
-                enumerator = new MMDeviceEnumerator() as IMMDeviceEnumerator;
-                if (enumerator == null) return false;
-
-                int hr = enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, ERole.eMultimedia, out device);
-                if (hr != 0 || device == null) return false;
-
-                Guid IID_IAudioEndpointVolume = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
-                hr = device.Activate(IID_IAudioEndpointVolume, 0, IntPtr.Zero, out object obj);
-                if (hr != 0 || obj == null) return false;
-
-                volume = obj as IAudioEndpointVolume;
-                if (volume == null) return false;
-
-                hr = volume.SetMasterVolumeLevelScalar(volumeLevel, Guid.Empty);
-                return hr == 0;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                if (volume != null) Marshal.ReleaseComObject(volume);
-                if (device != null) Marshal.ReleaseComObject(device);
-                if (enumerator != null) Marshal.ReleaseComObject(enumerator);
-            }
-        }
-
-        private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissionError, bool isSecondStage = false, int currentAttempt = 1, int totalAttempts = 1)
+private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissionError, bool isSecondStage = false)
         {
             int maxRetries = isSecondStage ? SECOND_STAGE_RETRIES : MAX_RETRIES;
             int retryCount = 0;
@@ -1070,35 +950,40 @@ namespace TimeSyncTool
             {
                 try
                 {
-                    DateTime ntpTime = GetNetworkTime(ntpServer);
-                    if (ntpTime != DateTime.MinValue)
+                    NtpResult ntp = NtpClient.Query(ntpServer);
+
+                    if (!ntp.IsValid)
                     {
-                        DateTime beijingTime = ntpTime.AddHours(8);
-                        if (SetLocalTime(beijingTime))
-                        {
-                            success = true;
-                        }
-                        else
-                        {
-                            uint errorCode = GetLastError();
-                            if (IsPermissionError(errorCode))
-                            {
-                                adminPermissionError = true;
-                            }
-                            else
-                            {
-                                HandleRetry(ref retryCount, GetErrorMessage(errorCode), maxRetries);
-                            }
-                        }
+                        // 协议校验不通过（stratum / mode / LI 异常），重试下一个服务器
+                        LogService.Write($"NTP 响应校验失败: {ntp.ValidationError}");
+                        HandleRetry(ref retryCount,
+                            ntp.ValidationError ?? $"无法从 {ntpServer} 获取时间", maxRetries);
+                        continue;
+                    }
+
+                    LogService.Write(ntp.Describe());
+
+                    // 时区换算交给 SystemTimeSetter，按系统实际时区处理（非写死 UTC+8）
+                    SetTimeResult setResult = SystemTimeSetter.SetToLocalTime(ntp.UtcTime);
+
+                    if (setResult.Success)
+                    {
+                        success = true;
+                    }
+                    else if (setResult.PermissionDenied)
+                    {
+                        LogService.Write("设置系统时间需要管理员权限");
+                        adminPermissionError = true;
                     }
                     else
                     {
-                        HandleRetry(ref retryCount, $"无法从 {ntpServer} 获取时间", maxRetries);
+                        HandleRetry(ref retryCount,
+                            setResult.ErrorMessage ?? "设置系统时间失败", maxRetries);
                     }
                 }
                 catch (Exception ex)
                 {
-                    if (IsPermissionException(ex))
+                    if (SystemTimeSetter.IsPermissionException(ex))
                         adminPermissionError = true;
                     else
                         HandleRetry(ref retryCount, ex.Message, maxRetries);
@@ -1107,125 +992,11 @@ namespace TimeSyncTool
             return success;
         }
 
-        private static bool IsPermissionError(uint errorCode)
-        {
-            return errorCode == 5 || errorCode == 1314;
-        }
-
-        private static bool IsPermissionException(Exception ex)
-        {
-            return ex is UnauthorizedAccessException ||
-                   ex.Message.IndexOf("access", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   ex.Message.Contains("权限") ||
-                   ex.Message.IndexOf("privilege", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   ex.Message.IndexOf("admin", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   ex.Message.Contains("管理员");
-        }
-
         private static void HandleRetry(ref int retryCount, string errorMessage, int maxRetries)
         {
             retryCount++;
             if (retryCount <= maxRetries)
                 Thread.Sleep(RETRY_DELAY_MS);
-        }
-
-        private static string GetErrorMessage(uint errorCode)
-        {
-            switch (errorCode)
-            {
-                case 5: return "拒绝访问！ - 需要管理员权限";
-                case 1314: return "客户端没有所需的特权 - 需要管理员权限";
-                case 13: return "数据无效";
-                case 87: return "参数错误";
-                default: return $"错误代码: {errorCode}";
-            }
-        }
-
-        private static DateTime GetNetworkTime(string ntpServer)
-        {
-            try
-            {
-                var ntpData = new byte[48];
-                ntpData[0] = 0x1B;
-
-                IPAddress ipAddress = null;
-                var addresses = Dns.GetHostEntry(ntpServer).AddressList;
-
-                foreach (var addr in addresses)
-                {
-                    if (addr.AddressFamily == AddressFamily.InterNetwork)
-                    {
-                        ipAddress = addr;
-                        break;
-                    }
-                }
-
-                if (ipAddress == null && addresses.Length > 0)
-                    ipAddress = addresses[0];
-
-                if (ipAddress == null)
-                    throw new Exception($"无法解析NTP服务器: {ntpServer}");
-
-                var ipEndPoint = new IPEndPoint(ipAddress, 123);
-
-                using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
-                {
-                    socket.ReceiveTimeout = 5000;
-                    socket.SendTimeout = 5000;
-
-                    IAsyncResult connectResult = socket.BeginConnect(ipEndPoint, null, null);
-                    if (!connectResult.AsyncWaitHandle.WaitOne(5000, false))
-                        throw new Exception("连接NTP服务器超时");
-                    socket.EndConnect(connectResult);
-
-                    IAsyncResult sendResult = socket.BeginSend(ntpData, 0, ntpData.Length, SocketFlags.None, null, null);
-                    if (!sendResult.AsyncWaitHandle.WaitOne(5000, false))
-                        throw new Exception("发送NTP请求超时");
-                    socket.EndSend(sendResult);
-
-                    IAsyncResult receiveResult = socket.BeginReceive(ntpData, 0, ntpData.Length, SocketFlags.None, null, null);
-                    if (!receiveResult.AsyncWaitHandle.WaitOne(5000, false))
-                        throw new Exception("接收NTP响应超时");
-                    int bytesReceived = socket.EndReceive(receiveResult);
-
-                    if (bytesReceived < 48)
-                        throw new Exception("接收的NTP数据不完整");
-                }
-
-                ulong intPart = (ulong)ntpData[40] << 24 | (ulong)ntpData[41] << 16 | (ulong)ntpData[42] << 8 | ntpData[43];
-                ulong fractPart = (ulong)ntpData[44] << 24 | (ulong)ntpData[45] << 16 | (ulong)ntpData[46] << 8 | ntpData[47];
-
-                var milliseconds = (intPart * 1000) + ((fractPart * 1000) / 0x100000000L);
-                var networkDateTime = new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds((long)milliseconds);
-
-                return networkDateTime;
-            }
-            catch (Exception ex)
-            {
-                throw new Exception($"获取NTP时间失败: {ex.Message}");
-            }
-        }
-
-        private static bool SetLocalTime(DateTime newTime)
-        {
-            try
-            {
-                SYSTEMTIME st = new SYSTEMTIME
-                {
-                    wYear = (short)newTime.Year,
-                    wMonth = (short)newTime.Month,
-                    wDay = (short)newTime.Day,
-                    wHour = (short)newTime.Hour,
-                    wMinute = (short)newTime.Minute,
-                    wSecond = (short)newTime.Second,
-                    wMilliseconds = (short)newTime.Millisecond
-                };
-                return SetLocalTime(ref st);
-            }
-            catch (Exception ex)
-            {
-                throw new Exception($"设置系统时间时发生错误: {ex.Message}");
-            }
         }
 
         private void LoadSettings()
@@ -1263,60 +1034,25 @@ namespace TimeSyncTool
 
         private void UpdateAutoStartTask()
         {
-            try
+            WriteLog("UpdateAutoStartTask 开始, _autoStart=" + _autoStart);
+
+            AutoStartResult result = AutoStartService.Sync(_autoStart, Application.ExecutablePath);
+
+            if (!string.IsNullOrEmpty(result.Detail))
+                WriteLog(result.Detail);
+
+            if (result.Success)
             {
-                WriteLog($"========== UpdateAutoStartTask 开始 ==========");
-                WriteLog($"_autoStart 当前值: {_autoStart}");
-
-                using (TaskService ts = new TaskService())
-                {
-                    if (_autoStart)
-                    {
-                        if (!File.Exists(Application.ExecutablePath))
-                        {
-                            WriteLog($"错误：程序文件不存在");
-                            return;
-                        }
-
-                        Microsoft.Win32.TaskScheduler.Task existingTask = ts.GetTask(TASK_NAME);
-                        if (existingTask != null)
-                        {
-                            ts.RootFolder.DeleteTask(TASK_NAME, false);
-                            WriteLog("旧任务已删除");
-                        }
-
-                        TaskDefinition td = ts.NewTask();
-                        td.RegistrationInfo.Description = "川中计算机协会 - 陈叔叔系统优化工具";
-                        td.RegistrationInfo.Author = "TimeSyncTool";
-
-                        td.Triggers.Add(new LogonTrigger
-                        {
-                            UserId = null,
-                            Delay = TimeSpan.FromSeconds(5)
-                        });
-
-                        td.Actions.Add(new Microsoft.Win32.TaskScheduler.ExecAction(Application.ExecutablePath, null, null));
-
-                        ts.RootFolder.RegisterTaskDefinition(TASK_NAME, td);
-                        WriteLog($"√ 任务计划创建成功");
-                    }
-                    else
-                    {
-                        Microsoft.Win32.TaskScheduler.Task existingTask = ts.GetTask(TASK_NAME);
-                        if (existingTask != null)
-                        {
-                            ts.RootFolder.DeleteTask(TASK_NAME, false);
-                            WriteLog("√ 任务已删除");
-                        }
-                    }
-                }
-                WriteLog($"========== UpdateAutoStartTask 完成 ==========\n");
+                WriteLog("UpdateAutoStartTask 完成");
             }
-            catch (Exception ex)
+            else
             {
-                WriteLog($"UpdateAutoStartTask 异常：{ex.Message}");
-                MessageBox.Show("设置开机自启失败，请尝试以管理员身份运行程序。",
-                    "任务计划创建失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                WriteLog("UpdateAutoStartTask 失败: " + result.ErrorMessage);
+                if (result.ShouldNotifyUser)
+                {
+                    MessageBox.Show("设置开机自启失败，请尝试以管理员身份运行程序。",
+                        "任务计划创建失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
             }
         }
 
@@ -1441,18 +1177,14 @@ namespace TimeSyncTool
             // 4. 删除开机自启任务计划
             try
             {
-                using (TaskService ts = new TaskService())
+                if (AutoStartService.Remove())
                 {
-                    var task = ts.GetTask(TASK_NAME);
-                    if (task != null)
-                    {
-                        ts.RootFolder.DeleteTask(TASK_NAME, false);
-                        AddLog("√ 已删除开机自启任务计划\n", Color.Green);
-                    }
-                    else
-                    {
-                        AddLog("开机自启任务计划不存在，跳过\n", Color.Gray);
-                    }
+                    AddLog("√ 已删除开机自启任务计划\n", Color.Green);
+                }
+                else
+                {
+                    AddLog("删除任务计划失败\n", Color.Red);
+                    success = false;
                 }
             }
             catch (Exception ex)
@@ -1460,7 +1192,6 @@ namespace TimeSyncTool
                 AddLog($"× 删除任务计划失败: {ex.Message}\n", Color.Red);
                 success = false;
             }
-
 
             // 5. 提示删除完成
             AddLog("\n========== 卸载完成 ==========\n", success ? Color.Green : Color.Red);
