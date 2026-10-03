@@ -279,10 +279,18 @@ namespace SeewoOpt.Services
             public short wMilliseconds;
         }
 
-        [DllImport("kernel32.dll", SetLastError = true)]
+        /// <summary>
+        /// 设置系统时间。
+        ///
+        /// EntryPoint 必须显式指定：DllImport 默认把 C# 方法名当作导出名，
+        /// 而 kernel32.dll 里的真实导出名是 SetSystemTime。上一版为规避与
+        /// 包装方法同名而把 C# 方法改名为 SetSystemTimeNative，却漏了 EntryPoint，
+        /// 运行时抛 EntryPointNotFoundException（表现为每个服务器都"失败"）。
+        /// </summary>
+        [DllImport("kernel32.dll", EntryPoint = "SetSystemTime", SetLastError = true)]
         private static extern bool SetSystemTimeNative(ref SYSTEMTIME st);
 
-        [DllImport("kernel32.dll")]
+        [DllImport("kernel32.dll", EntryPoint = "GetLastError")]
         private static extern uint GetLastErrorNative();
 
         /// <summary>Win32 错误码：ERROR_ACCESS_DENIED</summary>
