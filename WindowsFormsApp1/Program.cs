@@ -153,14 +153,19 @@ namespace SeewoOpt
             }
             finally
             {
+                // 【顺序】必须先释放互斥体，再写结束标记。
+                // ReleaseMutex 自身会写一条"互斥体已释放"日志，若放在
+                // EndSession 之后，这条日志就会落在"======== RUN 结束 ========"
+                // 之下、跑到本次运行的分段之外——看上去像属于下一次运行，
+                // 实则不是。凡是本次运行产生的日志都应落在结束标记之前。
+                ReleaseMutex();
+
                 // 收尾日志分段。放在 finally 里是因为它是唯一保证会执行的路径：
                 // 正常退出、Main 抛异常、Run 抛异常都会走到这里。
                 // 被强杀（任务管理器结束进程、断电）时不会执行——那种情况
                 // 日志里就没有结束标记，下次启动一眼能看出上次是异常终止的。
                 // 重复调用是安全的：LogService.EndSession 自身幂等。
                 LogService.EndSession(_exitReason);
-
-                ReleaseMutex();
             }
         }
 
@@ -598,11 +603,20 @@ namespace SeewoOpt
             if (!string.IsNullOrEmpty(reason))
                 _exitReason = reason;
 
-            // 先写结束标记，再释放资源——顺序反了可能来不及落盘就被 Environment.Exit 截断。
-            // 幂等由 LogService 内部保证，所以即使接着走到 Main 的 finally 也不会重复。
+            // 【顺序】先释放互斥体，再写结束标记——因为 ReleaseMutex 自己会写
+            // 一条"互斥体已释放"日志，若放在后面就会跑到分隔之外。
+            //
+            // 这里能安全地把 ReleaseMutex 提前，是因为它内部会先
+            // singleInstanceMutex.Close() 把句柄交还系统；Windows 在进程终止时
+            // 也会自动放弃未释放的互斥体。也就是说，即便紧随其后的
+            // Environment.Exit 把后续语句截断，单实例保护仍然成立。
+            ReleaseMutex();
+
+            // 结束标记最后写：它是"本次运行到此为止"的分界线，必须压在
+            // 所有本次运行的日志之下，所以由它收尾。
+            // 幂等由 LogService 内部保证，即使接着走到 Main 的 finally 也不会重复。
             LogService.EndSession(_exitReason);
 
-            ReleaseMutex();
             Application.Exit();
             Environment.Exit(exitCode);
         }
