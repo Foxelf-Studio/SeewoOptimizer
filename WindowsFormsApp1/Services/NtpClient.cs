@@ -343,11 +343,27 @@ namespace SeewoOpt.Services
     /// 【命名冲突修正】
     /// 原代码里包装方法叫 SetLocalTime(DateTime)，P/Invoke 也叫 SetLocalTime(ref SYSTEMTIME)，
     /// 靠重载解析区分。这在阅读时极易误认为递归调用，且一旦包装方法签名变化就会静默
-    /// 变成调用自身。现分别命名为 TrySetLocalTime / SetSystemTimeNative。
+    /// 变成调用自身。现分别命名为 SetToUtc / SetSystemTimeNative。
     ///
-    /// 【时区修正】
-    /// 原实现写死 AddHours(8)，默认用户在中国时区。改用 TimeZoneInfo.ConvertTimeFromUtc，
-    /// 非中国区用户也能得到正确的本地时间。
+    /// 【时区修正 —— 2026-10-04 第二次修正，修掉"多 8 小时"的 bug】
+    ///
+    /// 曾有两版实现，两次都在"UTC 与本地时间"上出错，值得记下来：
+    ///
+    /// 第一版：写死 <c>utcTime.AddHours(8)</c>，把 UTC 硬加成东八区本地时间，
+    ///         再交给 SetSystemTime。非中国时区用户会得到错误结果。
+    ///
+    /// 第二版：改用 <c>TimeZoneInfo.ConvertTimeFromUtc</c> 做时区换算，看似更正确，
+    ///         实际仍是错的。因为 <c>SetSystemTime</c> 要的参数是 **UTC**，
+    ///         而它传的是**本地时间**——于是 Windows 把"本地时间"当成 UTC，
+    ///         显示时又加一次时区偏移，结果**整整多出一个时区**（UTC+8 下多 8 小时）。
+    ///         实测：NTP 给 UTC 05:45:42，写完后系统显示 21:45:42。
+    ///
+    /// 两版的共同误判是"拿到 UTC 后总要做点什么转换才能写进系统"。
+    /// 事实相反：SetSystemTime 接受的就是 UTC，此处**不能做任何时区换算**。
+    /// 时区只影响 Windows 如何*显示*，不影响它如何*存储*——存储始终是 UTC。
+    ///
+    /// 因此本类只暴露 SetToUtc，用名字把契约写在脸上，避免后来者再"顺手加个转换"。
+    /// 需要本地时间时用 ToLocalTime，但那个值**不应该**喂给 SetSystemTime。
     /// </summary>
     public static class SystemTimeSetter
     {
@@ -371,6 +387,8 @@ namespace SeewoOpt.Services
         /// 而 kernel32.dll 里的真实导出名是 SetSystemTime。上一版为规避与
         /// 包装方法同名而把 C# 方法改名为 SetSystemTimeNative，却漏了 EntryPoint，
         /// 运行时抛 EntryPointNotFoundException（表现为每个服务器都"失败"）。
+        ///
+        /// 注意导出名是 SetSystemTime（收 UTC），**不是** SetLocalTime（收本地时间）。
         /// </summary>
         [DllImport("kernel32.dll", EntryPoint = "SetSystemTime", SetLastError = true)]
         private static extern bool SetSystemTimeNative(ref SYSTEMTIME st);
@@ -387,8 +405,8 @@ namespace SeewoOpt.Services
         /// <summary>
         /// 把 UTC 时间转换为当前系统的本地时间。
         ///
-        /// 原实现是 AddHours(8) 写死东八区。此处按系统实际时区转换，
-        /// 对 UTC+8 用户结果完全一致，对其他时区用户则是正确的修正。
+        /// 【仅供显示与日志使用】不要把这个结果传给 SetToUtc——
+        /// 那正是 2026-10-04 那个"多 8 小时" bug 的成因。
         /// </summary>
         public static DateTime ToLocalTime(DateTime utcTime)
         {
@@ -398,23 +416,82 @@ namespace SeewoOpt.Services
             return TimeZoneInfo.ConvertTimeFromUtc(utcTime, TimeZoneInfo.Local);
         }
 
-        /// <summary>设置系统时间。结果通过返回值携带，不抛异常。</summary>
-        public static SetTimeResult SetToLocalTime(DateTime utcTime)
+        /// <summary>
+        /// 一个待写入系统的时刻，按 UTC 拆成系统时钟所需的各字段。
+        ///
+        /// 【为什么单独抽出来】这是"多 8 小时" bug 的实际发生地，而它原先藏在
+        /// SetToUtc 内部、被 SYSTEMTIME（private）和 SetSystemTimeNative（需管理员）
+        /// 挡在后面，无法在单元测试里断言。抽成 public 纯函数后，
+        /// "喂进去的秒数是否等于 UTC 的秒数"可以被直接验证，
+        /// 不必真的去改测试机的时钟。
+        ///
+        /// 【契约】所有字段取自传入时间的 UTC 表示。此结构不含任何时区信息，
+        /// 时区由 Windows 在显示时应用。
+        /// </summary>
+        public struct ClockFields
         {
-            DateTime local = ToLocalTime(utcTime);
+            public int Year, Month, Day, Hour, Minute, Second, Millisecond;
+
+            public override string ToString()
+            {
+                return string.Format("{0:D4}-{1:D2}-{2:D2} {3:D2}:{4:D2}:{5:D2}.{6:D3}",
+                    Year, Month, Day, Hour, Minute, Second, Millisecond);
+            }
+        }
+
+        /// <summary>
+        /// 把传入的 UTC 时刻拆成系统时钟字段。
+        ///
+        /// 【关键】这里**绝不做时区换算**。SetSystemTime 收的就是 UTC，
+        /// 转换一次就会多出一个时区偏移（UTC+8 下多 8 小时）。
+        /// 唯一的换算发生在 Kind == Local 时——那是在把调用方误传的
+        /// 本地时间纠正回 UTC，方向与"UTC 转本地"相反，不要搞反。
+        /// </summary>
+        public static ClockFields ToClockFields(DateTime utcTime)
+        {
+            DateTime utc = utcTime;
+            if (utc.Kind == DateTimeKind.Local)
+                utc = utc.ToUniversalTime();          // 纠正误传的本地时间
+            else if (utc.Kind == DateTimeKind.Unspecified)
+                utc = DateTime.SpecifyKind(utc, DateTimeKind.Utc);   // 契约上视为 UTC
+
+            return new ClockFields
+            {
+                Year = utc.Year,
+                Month = utc.Month,
+                Day = utc.Day,
+                Hour = utc.Hour,
+                Minute = utc.Minute,
+                Second = utc.Second,
+                Millisecond = utc.Millisecond
+            };
+        }
+
+        /// <summary>
+        /// 用 UTC 时间设置系统时钟。
+        ///
+        /// 入参必须是 UTC。这里**刻意不做任何时区换算**：
+        /// SetSystemTime 收的就是 UTC，Windows 会在显示时自行应用当前时区。
+        /// 多转换一次就会多出一个时区偏移（UTC+8 下多 8 小时）。
+        ///
+        /// 结果通过返回值携带，不抛异常。
+        /// </summary>
+        public static SetTimeResult SetToUtc(DateTime utcTime)
+        {
+            ClockFields f = ToClockFields(utcTime);
 
             var result = new SetTimeResult();
             try
             {
                 SYSTEMTIME st = new SYSTEMTIME
                 {
-                    wYear = (short)local.Year,
-                    wMonth = (short)local.Month,
-                    wDay = (short)local.Day,
-                    wHour = (short)local.Hour,
-                    wMinute = (short)local.Minute,
-                    wSecond = (short)local.Second,
-                    wMilliseconds = (short)local.Millisecond
+                    wYear = (short)f.Year,
+                    wMonth = (short)f.Month,
+                    wDay = (short)f.Day,
+                    wHour = (short)f.Hour,
+                    wMinute = (short)f.Minute,
+                    wSecond = (short)f.Second,
+                    wMilliseconds = (short)f.Millisecond
                 };
 
                 if (SetSystemTimeNative(ref st))

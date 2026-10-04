@@ -41,6 +41,10 @@ internal static class NtpClientTests
         TestRejectsUnsyncedStratum();
         TestRejectsAlarmLeapIndicator();
 
+        // --- 系统时钟写入契约（防"多 8 小时"回归）---
+        TestClockFieldsAreUtcNotLocal();
+        TestClockFieldsHandleKind();
+
         // --- 畸形输入 ---
         TestRejectsShortPacket();
         TestRejectsNullPacket();
@@ -348,6 +352,91 @@ internal static class NtpClientTests
 
         Check("500 组随机字节均不抛异常", threw == 0,
             threw > 0 ? $"{threw} 组抛出异常" : null);
+    }
+
+    // ---------------------------------------------------------------
+    // 系统时钟写入契约（2026-10-04 "多 8 小时" bug 的防回归）
+    //
+    // 【Bug 回顾】SetSystemTime 接受的是 UTC，代码却传了 ConvertTimeFromUtc
+    // 之后的本地时间。Windows 把该值当 UTC，显示时再加一次时区偏移，
+    // 结果整整多出一个时区。实测 UTC 05:45:42 写完后显示 21:45:42。
+    //
+    // 【第一版测试写错了，值得记下来】最初只断言"ToLocalTime 确实应用了偏移"
+    // 和"本地小时 ≠ UTC 小时"——这些是辅助函数的性质，与被测函数无关。
+    // 实测证明：把 bug 注回产品代码，那版测试**依然全绿**，什么都没抓住。
+    //
+    // 【现在怎么做】SystemTimeSetter.ToClockFields 是 bug 的实际发生地，
+    // 已被抽为 public 纯函数。测试直接断言它的输出字段：
+    //   - 喂 UTC 05:45:42，输出的小时必须还是 5，不能是 13
+    // 这样注释掉产品代码里的修复、改回 ToLocalTime，断言立刻失败（见下方对照）。
+    // ---------------------------------------------------------------
+
+    /// <summary>
+    /// 核心契约：ToClockFields 的输出字段必须等于输入 UTC 的字段，不得被时区改写。
+    /// </summary>
+    private static void TestClockFieldsAreUtcNotLocal()
+    {
+        DateTime utc = new DateTime(2026, 10, 4, 5, 45, 42, 123, DateTimeKind.Utc);
+        TimeSpan offset = TimeZoneInfo.Local.GetUtcOffset(utc);
+        DateTime local = utc + offset;
+
+        Console.WriteLine($"    （本机偏移 = {offset}，UTC {utc:HH:mm:ss} 对应的本地时间是 {local:HH:mm:ss}）");
+
+        SystemTimeSetter.ClockFields f = SystemTimeSetter.ToClockFields(utc);
+
+        // 这一条是本次 bug 的正身。若产品代码里误把 utc 换成本地时间，
+        // 在 UTC+8 下 Hour 会变成 13 而失败。
+        Check($"Hour 取自 UTC，未被时区改写（得 {f.Hour}，期望 {utc.Hour}）",
+            f.Hour == utc.Hour,
+            $"得到 {f.Hour}，期望 {utc.Hour}"
+            + (f.Hour == local.Hour && offset != TimeSpan.Zero
+               ? $"  ← 看起来像被当成本地时间了（本地 {local.Hour}）" : ""));
+
+        Check($"Minute 取自 UTC（得 {f.Minute}，期望 {utc.Minute}）", f.Minute == utc.Minute, null);
+        Check($"Second 取自 UTC（得 {f.Second}，期望 {utc.Second}）", f.Second == utc.Second, null);
+        Check($"Millisecond 取自 UTC（得 {f.Millisecond}，期望 {utc.Millisecond}）", f.Millisecond == utc.Millisecond, null);
+        Check($"Year/Month/Day 取自 UTC（得 {f.Year}-{f.Month:D2}-{f.Day:D2}）",
+            f.Year == utc.Year && f.Month == utc.Month && f.Day == utc.Day, null);
+
+        // 边界：跨越 UTC 日界时，本地日期已变而 UTC 日期未变——最能暴露时区换算
+        DateTime edge = new DateTime(2026, 10, 4, 17, 30, 0, DateTimeKind.Utc); // UTC+8 → 次日 01:30
+        SystemTimeSetter.ClockFields fe = SystemTimeSetter.ToClockFields(edge);
+        if (offset == TimeSpan.FromHours(8))
+        {
+            Check("跨日界：UTC 17:30 仍记为 4 日 17:30，不得变成 5 日 01:30",
+                fe.Day == 4 && fe.Hour == 17,
+                $"得到 {fe}");
+        }
+        else
+        {
+            Check($"跨日界检查（本机偏移 {offset}，仅校验等于 UTC）",
+                fe.Day == edge.Day && fe.Hour == edge.Hour,
+                $"得到 {fe}");
+        }
+    }
+
+    /// <summary>
+    /// 契约：入参 Kind 决定是否换算——Local 会被纠正回 UTC，Utc/Unspecified 原样使用。
+    /// </summary>
+    private static void TestClockFieldsHandleKind()
+    {
+        DateTime utcValue = new DateTime(2026, 10, 4, 5, 45, 42, DateTimeKind.Utc);
+        SystemTimeSetter.ClockFields expected = SystemTimeSetter.ToClockFields(utcValue);
+
+        // Utc 与 Unspecified 结果应完全一致
+        var unspecified = SystemTimeSetter.ToClockFields(
+            new DateTime(2026, 10, 4, 5, 45, 42, DateTimeKind.Unspecified));
+        Check("Unspecified 视为 UTC，不叠加时区",
+            unspecified.Hour == expected.Hour && unspecified.Day == expected.Day,
+            $"得到 {unspecified}，期望 {expected}");
+
+        // Local 应被纠正回 UTC：本地时刻 → ToUniversalTime → 字段
+        DateTime localMoment = new DateTime(2026, 10, 4, 13, 45, 42, DateTimeKind.Local);
+        var fromLocal = SystemTimeSetter.ToClockFields(localMoment);
+        DateTime asUtc = localMoment.ToUniversalTime();
+        Check($"Local 被纠正回 UTC（13:45:42 本地 → {asUtc:HH:mm:ss} UTC）",
+            fromLocal.Hour == asUtc.Hour,
+            $"得到 {fromLocal.Hour}，期望 {asUtc.Hour}");
     }
 
     // ---------------------------------------------------------------

@@ -990,12 +990,17 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
 
                     LogService.Write(ntp.Describe());
 
-                    // 时区换算交给 SystemTimeSetter，按系统实际时区处理（非写死 UTC+8）
-                    SetTimeResult setResult = SystemTimeSetter.SetToLocalTime(ntp.UtcTime);
+                    // 直接把 NTP 的 UTC 交给系统时钟。绝不在此处做时区换算：
+                    // SetSystemTime 收的就是 UTC，Windows 显示时会自行应用当前时区。
+                    // 曾经在这里转成本地时间再写入，导致系统时间整整多出一个时区（+8 小时）。
+                    SetTimeResult setResult = SystemTimeSetter.SetToUtc(ntp.UtcTime);
 
                     if (setResult.Success)
                     {
                         success = true;
+                        // 日志仍打本地时间，方便人读；但写进系统的是上面那个 UTC 值。
+                        LogService.Write($"系统时钟已设置为 UTC {ntp.UtcTime:yyyy-MM-dd HH:mm:ss}"
+                                        + $"（本地时间 {SystemTimeSetter.ToLocalTime(ntp.UtcTime):yyyy-MM-dd HH:mm:ss}）");
                     }
                     else if (setResult.PermissionDenied)
                     {
