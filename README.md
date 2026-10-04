@@ -163,11 +163,28 @@ sequenceDiagram
 
 ```
 SeewoOptimizer/
-├── Program.cs              # 程序入口、单实例、更新逻辑、DLL 提取
-├── TimeSyncForm.cs         # 主窗体、时间同步核心、音量调节、WPS 清理
-├── SettingsForm.cs         # 设置窗体（需自行实现）
-├── Microsoft.Win32.TaskScheduler.dll  # 任务计划依赖（内嵌资源）
-└── well.ico                 # 程序图标（嵌入资源）
+├── WindowsFormsApp1/            # 主工程（net48 WinForms，非 SDK-style）
+│   ├── Program.cs               # 程序入口、单实例、DLL 提取
+│   ├── MainForm.cs              # 主窗体
+│   ├── SettingsForm.cs          # 设置窗体
+│   ├── Properties/
+│   │   ├── AssemblyInfo.cs      # 版本号在这里
+│   │   └── app.manifest
+│   ├── Services/
+│   │   ├── NtpClient.cs         # NTP 协议解析（纯函数，可单测）
+│   │   ├── AutoStartService.cs  # 任务计划开机自启
+│   │   ├── SettingsStore.cs     # 注册表设置持久化
+│   │   ├── UpdateService.cs     # GitHub Releases 自动更新
+│   │   └── ...
+│   ├── Microsoft.Win32.TaskScheduler.dll   # 任务计划依赖（内嵌资源）
+│   └── well.ico                 # 程序图标（嵌入资源）
+├── WindowsFormsApp1.sln
+├── tools/                       # 构建辅助（本地构建用，CI 不需要）
+│   ├── sync.cmd                 # 源码镜像：仓库 -> 本机构建工位
+│   ├── build.cmd                # 同步 + 编译
+│   ├── publish.cmd              # 同步 + 编译 + 签名 + 公钥自检
+│   └── NtpClientTests.cs(.csproj)   # NTP 协议解析单元测试
+└── .github/workflows/build.yml  # CI：编译校验 + 跑单元测试
 ```
 
 ---
@@ -177,22 +194,39 @@ SeewoOptimizer/
 ### 环境要求
 
 - Windows 7 SP1 或更高版本
-- .NET Framework 4.7.2 或更高版本
+- .NET Framework **4.8**（运行时）；编译目标同为 4.8
 
 ### 编译步骤
+
+**推荐：用仓库自带脚本**（无需安装 Visual Studio）
+
+```bash
+cd tools
+build.cmd              # Release（默认）
+build.cmd Debug        # Debug
+```
+
+脚本会先把仓库源码镜像到构建工位，再编译。
+首次使用需先参照 `tools/` 脚本内的路径注释准备好参考程序集与 NuGet 包。
+
+**或者：用 Visual Studio 2022**
 
 1. 克隆仓库
 ```bash
 git clone https://github.com/Foxelf-Studio/SeewoOptimizer.git
 ```
-
-2. 使用 Visual Studio 2022 打开解决方案
-
-3. 还原 NuGet 包（如果有）
-
+2. 用 Visual Studio 2022 打开 `WindowsFormsApp1.sln`
+3. 还原 NuGet 包
 4. 编译生成（Release / AnyCPU）
-
 5. 运行 `bin\Release\SeewoOpt.exe`
+
+### 自动化校验
+
+CI 在每次 push / PR 时自动编译并跑单元测试，见 `.github/workflows/build.yml`。
+本地也可以单独跑 `tools/` 下的测试工程，验证 NTP 协议解析逻辑。
+
+> **注意**：CI 只做编译校验，不发布产物——发布需要对 exe 用本机私钥签名，
+> 而私钥绝不能上传到云端。
 
 ---
 
