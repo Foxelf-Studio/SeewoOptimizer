@@ -29,6 +29,21 @@ namespace WindowsFormsApp1
         // 否则 UI 侧 Timer 可能读到缓存值导致窗口一直卡在托盘不退出）
         public static volatile bool UpdateCheckCompleted = false;
 
+        // 本次运行中更新检查是否失败过。
+        //
+        // 【为什么需要它】本工具的核心场景就是"本机时钟错误"，而时钟错误
+        // 会让每一次 HTTPS 都因证书 notBefore 尚未到达而失败。
+        // 时序上更新检查先于时间同步启动（Main 里就 Task.Run 了），
+        // 于是每次开机时钟都不对时，更新检查必然失败，
+        // 而 finally 又会把 UpdateCheckCompleted 置 true，
+        // 同步成功后 UI 看到"已完成"就直接退出——自动更新永久失效。
+        // 时间同步成功后据此重试，把失效的更新能力救回来。
+        private static volatile bool _updateCheckFailed = false;
+
+        // 更新检查是否正在运行。用 Interlocked 做无锁保护，
+        // 防止首次检查尚未收尾时又发起一次重试。
+        private static int _updateCheckRunning = 0;
+
         // 更新检测事件（用于通知 TimeSyncForm 显示气泡）
         public static event Action<string, string> UpdateDetected;
 
@@ -64,18 +79,7 @@ namespace WindowsFormsApp1
         EnsureRequiredDllsExist();
 
                 // 异步检查新版本（不阻塞主线程）
-                Task.Run(() => CheckForUpdatesAsync()).ContinueWith(t =>
-                {
-                    if (t.IsFaulted)
-                    {
-                        WriteLog($"更新检查任务异常: {t.Exception?.Message}");
-                        WriteLog($"异常详情: {t.Exception}");
-                    }
-                    else
-                    {
-                        WriteLog("更新检查任务正常完成");
-                    }
-                });
+                StartUpdateCheck("启动时");
 
                 WriteLog("========================================");
                 WriteLog($"程序启动 - 时间: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
@@ -213,6 +217,65 @@ namespace WindowsFormsApp1
         }
 
         /// <summary>
+        /// 发起一次更新检查。统一入口，便于在时间同步成功后重试。
+        ///
+        /// 【重试的必要性】本工具用于修复错误时钟，而错误时钟会让 HTTPS
+        /// 证书校验必然失败。启动时的检查发生在同步之前，因此每次开机
+        /// 时钟都不对时，这次检查必定失败并被标记为"已完成"，
+        /// 程序随后退出，用户永远收不到更新——除非在这里重试。
+        /// </summary>
+        public static void StartUpdateCheck(string reason)
+        {
+            // 防止首次检查尚未收尾时重复发起
+            if (Interlocked.CompareExchange(ref _updateCheckRunning, 1, 0) != 0)
+            {
+                WriteLog($"更新检查已在进行中，跳过本次触发（{reason}）");
+                return;
+            }
+
+            WriteLog($"触发更新检查（{reason}）");
+
+            Task.Run(() => CheckForUpdatesAsync()).ContinueWith(t =>
+            {
+                Interlocked.Exchange(ref _updateCheckRunning, 0);
+
+                if (t.IsFaulted)
+                {
+                    _updateCheckFailed = true;
+                    WriteLog($"更新检查任务异常: {t.Exception?.Message}");
+                    WriteLog($"异常详情: {t.Exception}");
+                }
+                else
+                {
+                    WriteLog("更新检查任务正常完成");
+                }
+            });
+        }
+
+        /// <summary>
+        /// 时间同步成功后调用，重试此前失败的更新检查。
+        ///
+        /// 只有确实失败过才重试——正常路径下首次检查已经拿到结果，
+        /// 再跑一遍纯属浪费请求，也会让 UI 多等一轮。
+        /// </summary>
+        public static void RetryUpdateCheckAfterSync()
+        {
+            if (!_updateCheckFailed)
+            {
+                WriteLog("首次更新检查成功，无需重试");
+                return;
+            }
+
+            WriteLog("时间已修正，重试更新检查");
+            _updateCheckFailed = false;
+
+            // 关键：重置完成标志，否则 TimeSyncForm 会因读到上一轮的 true
+            // 而直接 Application.Exit()，重试还没开始程序就退没了。
+            UpdateCheckCompleted = false;
+            StartUpdateCheck("时间同步后重试");
+        }
+
+        /// <summary>
         /// 异步检查 GitHub 上的新版本
         /// </summary>
         private static async Task CheckForUpdatesAsync()
@@ -305,16 +368,20 @@ namespace WindowsFormsApp1
             }
             catch (Exception ex)
             {
+                // 无论何种原因失败都要置位：时间同步成功后会重试，
+                // 而重试是恢复"时钟错误导致更新永久失效"的唯一机会。
+                _updateCheckFailed = true;
+
                 // 本机时钟严重错误时，几乎所有 HTTPS 都会以"证书无效"失败：
                 // 证书的 notBefore/notAfter 是绝对时间，1980 年的本机时钟会让
                 // 每一张证书都变成"尚未生效"。这不是网络故障，但日志里表现为
                 // trust relationship 失败，极易被误判成网络问题而查错方向。
-                // 这里识别出来并说明真实原因——时间同步成功后重试即可。
+                // 这里识别出来并说明真实原因——时间同步成功后会重试。
                 if (IsCertificateTimeFailure(ex))
                 {
-                    WriteLog("更新检查跳过：本机时间与证书有效期不匹配，" +
+                    WriteLog("更新检查失败：本机时间与证书有效期不匹配，" +
                              $"当前 {DateTime.Now:yyyy-MM-dd}，HTTPS 证书校验必然失败。" +
-                             "完成时间同步后会自动恢复，本次不影响校时功能。");
+                             "时间同步成功后会自动重试。");
                 }
                 else
                 {

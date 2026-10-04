@@ -85,6 +85,10 @@ namespace TimeSyncTool
         private const int STAGE_DISPLAY_DELAY_MS = 2000;
         private const int SERVER_SWITCH_DELAY_MS = 1000;
 
+        // 时间同步成功后，等待更新检查结束的最长时间。
+        // 超过则强制退出，避免网络异常时程序永远卡在托盘。
+        private const int UPDATE_CHECK_WAIT_LIMIT_MS = 60000;
+
         // 前 4 个为主要服务器，全部失败后才启用备用服务器。
         // 原代码用字面量 4 与 i-3 表达这个阶段划分，容易看错，现提取为常量。
         private const int PRIMARY_SERVER_COUNT = 4;
@@ -769,6 +773,13 @@ namespace TimeSyncTool
                         if (trayIcon != null)
                             trayIcon.ShowBalloonTip(3000, "时间同步完成", "系统时间已成功同步！后台更新检测中...", ToolTipIcon.Info);
 
+                        // 必须在下面检查 UpdateCheckCompleted 之前重试。
+                        // 本工具的使用场景就是"时钟错误"，而时钟错误会让
+                        // 启动时那次更新检查必然因证书未生效而失败。
+                        // 若不重置标志，UI 会读到上一轮残留的 true 直接退出，
+                        // 用户永远收不到更新——开机时钟总是不对就永久失效。
+                        Program.RetryUpdateCheckAfterSync();
+
                         if (WaitOrCancel(2000)) return;
                         this.Invoke(new MethodInvoker(() => MinimizeToTray()));
 
@@ -781,13 +792,24 @@ namespace TimeSyncTool
                                 return;
                             }
 
+                            // 兜底上限：更新检查的网络请求若因断网等原因一直不返回，
+                            // 没有这个上限程序会永远卡在托盘不退出。
+                            // 校时本身已经完成，更新没查到也不该拖着用户。
+                            int elapsedTicks = 0;
+
                             System.Windows.Forms.Timer updateCheckTimer = new System.Windows.Forms.Timer();
                             updateCheckTimer.Interval = 1000;
                             updateCheckTimer.Tick += (s, args) =>
                             {
-                                if (Program.UpdateCheckCompleted)
+                                elapsedTicks += updateCheckTimer.Interval;
+
+                                if (Program.UpdateCheckCompleted || elapsedTicks >= UPDATE_CHECK_WAIT_LIMIT_MS)
                                 {
                                     updateCheckTimer.Stop();
+
+                                    if (!Program.UpdateCheckCompleted)
+                                        WriteLog($"等待更新检查超过 {UPDATE_CHECK_WAIT_LIMIT_MS / 1000} 秒，强制退出");
+
                                     syncCompleted = true;
                                     Application.Exit();
                                 }

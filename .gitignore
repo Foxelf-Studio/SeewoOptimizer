@@ -42,3 +42,7 @@ appsettings.*.json
 *.pfx
 *.p12
 signing/
+
+# 验证脚本的构建输出
+tools/bin/
+tools/obj/
