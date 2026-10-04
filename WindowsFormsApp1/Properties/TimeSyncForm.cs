@@ -6,10 +6,9 @@ using System.Reflection;
 using System.Threading;
 using System.Windows.Forms;
 using SeewoOpt.Services;
-using WindowsFormsApp1;
 using Microsoft.VisualBasic;
 
-namespace TimeSyncTool
+namespace SeewoOpt
 {
     public class TimeSyncForm : Form
     {

@@ -1,0 +1,209 @@
+name: 编译校验
+
+# 这个 workflow 的定位：**编译校验**，不是发布流水线。
+#
+# 发布仍然由维护者在本机（G:\SeewoBuild）手动执行并签字，
+# 因为自更新信任链依赖本机私钥签名（signing/private_key.pem，绝不入库）。
+# 因此这里不做 build → pack → upload，只回答一个问题：
+# "这份提交在干净环境里能不能编译通过、测试能不能过。"
+#
+# 【为什么值得单独跑一遍】
+# 本机的编译环境是 G:\SeewoBuild：自备 targeting pack、镜像项目目录、
+# 已还原的 packages。这三样都不在版本控制里，所以本机能编过**不能证明**
+# 新克隆的仓库能编过。实际踩过的坑：
+#   - packages/ 被 .gitignore 忽略，新克隆缺 Microsoft.Win32.TaskScheduler.dll
+#   - TargetFrameworkRootPath=G:\SeewoBuild\build 是本机绝对路径
+#   - net48 参考程序集来自本机那份自备包，不是系统自带
+# CI 用"干净检出 + 只安装公开依赖"来复现新用户的处境。
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  # 允许手动触发，便于在不推送的情况下验证 workflow 本身
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: net48 编译 + NtpClient 单元测试
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # NtpClient 的协议解析测试用 net10.0 运行（纯函数，无 net48 依赖）。
+      # windows-latest 目前预装 8.x/9.x，10 需显式安装。
+      # 放在最前面：虽然编译主程序用的是 MSBuild 而非 dotnet SDK，
+      # 但让 SDK 先行就位，后续任何步骤要用 dotnet 都不必再关心顺序。
+      - name: 安装 .NET 10 SDK（供测试项目使用）
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # net48 目标需要 .NET Framework 4.8 参考程序集与 MSBuild。
+      # windows-latest 镜像自带 Visual Studio 2022，其中包含
+      #   <VS>\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\
+      # 但"镜像自带"是不该被当成前提的假设——镜像内容会变。
+      # 因此这里不硬性要求它存在，而是：
+      #   有 → 直接用（快，不下载）
+      #   无 → 从 NuGet 装一个 Microsoft.NETFramework.ReferenceAssemblies.net48，
+      #        一个仅含参考程序集的公开包（20MB，只读引用、不参与运行）
+      # 无论走哪条路，最后都产出 REF_ASSEMBLY_ROOT，
+      # 由后续编译步骤通过 -p:TargetFrameworkRootPath 显式指定，
+      # 从而彻底摆脱本机那个 G:\SeewoBuild\build 依赖。
+      - name: 准备 net48 参考程序集
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles}\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8",
+            "${env:ProgramFiles(x86)}\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8"
+          )
+          $found = $candidates | Where-Object { Test-Path (Join-Path $_ "mscorlib.dll") } | Select-Object -First 1
+
+          if ($found) {
+            # 参考程序集根目录是 v4.8 的**上一级**（MSBuild 会在其下找 .NETFramework\v4.8）
+            $root = Split-Path (Split-Path $found -Parent) -Parent
+            Write-Host "[复用镜像自带] $found"
+          } else {
+            Write-Host "[镜像未自带] 从 NuGet 安装参考程序集包"
+            # -UseBasicParsing 见下方"还原 NuGet 依赖"一节的说明
+            Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" `
+              -OutFile "nuget.exe" -UseBasicParsing
+            & "$PWD\nuget.exe" install Microsoft.NETFramework.ReferenceAssemblies.net48 `
+              -Version 1.0.3 -OutputDirectory refpkgs -NonInteractive -Source https://api.nuget.org/v3/index.json
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $root = "$PWD\refpkgs\Microsoft.NETFramework.ReferenceAssemblies.net48.1.0.3\build"
+            Write-Host "[已下载] $root"
+          }
+
+          if (-not (Test-Path (Join-Path $root ".NETFramework\v4.8\mscorlib.dll"))) {
+            Write-Error "参考程序集准备失败：$root\.NETFramework\v4.8\mscorlib.dll 不存在"
+            exit 1
+          }
+          Write-Host "参考程序集根: $root"
+          Write-Host "  → $root\.NETFramework\v4.8\mscorlib.dll"
+
+          # 【为什么不用 Out-File / >> 写 GITHUB_ENV】
+          # 实测过这两种写法，都不能保证编码正确：
+          #   Out-File -Encoding utf8     → PS 5.1 会写 UTF-8 BOM
+          #   "..." >> $env:GITHUB_ENV    → PS 5.1 的 >> 默认写 UTF-16 LE
+          # GITHUB_ENV 里混入 BOM 会让变量名变成 "\ufeffREF_ASSEMBLY_ROOT"，
+          # 后续步骤读到空值，表现为 TargetFrameworkRootPath= 为空、
+          # MSBuild 报 MSB3644（找不到参考程序集）——离真正原因很远。
+          # 用 .NET API 显式指定"UTF-8 无 BOM"，在 PS 5.1 与 7 下行为一致。
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::AppendAllText(
+            $env:GITHUB_ENV, "REF_ASSEMBLY_ROOT=$root`n", $utf8NoBom)
+
+      - name: 定位 MSBuild
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            Write-Error "找不到 vswhere.exe，无法定位 MSBuild"
+            exit 1
+          }
+          $msbuild = & $vswhere -latest -products * `
+            -requires Microsoft.Component.MSBuild `
+            -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+          if (-not $msbuild -or -not (Test-Path $msbuild)) {
+            Write-Error "未能定位 MSBuild.exe"
+            exit 1
+          }
+          Write-Host "MSBuild: $msbuild"
+          # 同"准备参考程序集"一节：必须 UTF-8 无 BOM（见那里的说明）
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::AppendAllText(
+            $env:GITHUB_ENV, "MSBUILD_PATH=$msbuild`n", $utf8NoBom)
+
+      # 【这一步是 CI 能跑通的关键】
+      # packages/ 在 .gitignore 里（NuGet 还原产物不该入库），
+      # 而 WindowsFormsApp1.csproj 用 HintPath 引用
+      #   ..\packages\TaskScheduler.2.12.2\lib\net45\Microsoft.Win32.TaskScheduler.dll
+      # 所以干净检出后这个 DLL 必然缺失，编译报 CS0006/找不到文件。
+      # 用 nuget restore 还原到 packages/，让路径与本地布局一致。
+      - name: 还原 NuGet 依赖
+        shell: pwsh
+        run: |
+          $nuget = "nuget.exe"
+          if (-not (Get-Command $nuget -ErrorAction SilentlyContinue)) {
+            Write-Host "镜像未预装 nuget.exe，就地下载"
+            # -UseBasicParsing 是为了兼容 Windows PowerShell 5.1：
+            # 不带它时 Invoke-WebRequest 会尝试启动 IE 引擎解析响应，在无 UI 的
+            # 构建环境里可能直接报错。PS 7 已默认简化，但这里不能假设版本。
+            Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" `
+              -OutFile "nuget.exe" -UseBasicParsing
+            $nuget = "$PWD\nuget.exe"
+          }
+          & $nuget restore WindowsFormsApp1.sln -PackagesDirectory packages -NonInteractive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $dll = "packages\TaskScheduler.2.12.2\lib\net45\Microsoft.Win32.TaskScheduler.dll"
+          if (-not (Test-Path $dll)) {
+            Write-Error "还原后仍找不到 $dll"
+            exit 1
+          }
+          Write-Host "已还原: $dll"
+          Get-ChildItem packages | Select-Object Name
+
+      - name: 编译主程序（net48 / Release）
+        shell: pwsh
+        run: |
+          # 不使用 -t:Restore：本项目是 packages.config 老式项目，
+          # 依赖已由上一步 nuget restore 铺到 packages\，
+          # MSBuild 的 Restore 目标对它无包可还原，只会刷一行 "无可执行操作"。
+          # TargetFrameworkRootPath 指向上一步备好的参考程序集根，
+          # 从而不依赖本机那个 G:\SeewoBuild\build。
+          & "$env:MSBUILD_PATH" WindowsFormsApp1\WindowsFormsApp1.csproj `
+            -t:Build `
+            -p:Configuration=Release `
+            -p:Platform=AnyCPU `
+            -p:TargetFrameworkRootPath="$env:REF_ASSEMBLY_ROOT" `
+            -v:minimal `
+            -nologo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 校验编译产物存在
+        shell: pwsh
+        run: |
+          $exe = "WindowsFormsApp1\bin\Release\SeewoOpt.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "未生成 $exe"
+            exit 1
+          }
+          $item = Get-Item $exe
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
+          Write-Host ("产物: {0}  {1:N0} 字节  SHA256={2}" -f $item.Name, $item.Length, $hash)
+
+          # 【这个哈希只用于记录，不要拿来做等值断言】
+          # csproj 里有 <Deterministic>true</Deterministic>，但实测在旧式 csproj +
+          # MSBuild 下并未完全生效：PE 头的 TimeDateStamp（偏移 0x88，4 字节）
+          # 仍被写入构建时间，进而级联影响校验和与调试目录。
+          # 实测两份同源码产物长度相同（611,328 字节）、有 179 字节不同，
+          # 全部源于这个时间戳。
+          # 因此 CI 产物与本机产物**不会逐字节相同**——这是预期行为，
+          # 不是构建出了问题。哈希值写进 summary 是为了留痕，便于人工核对
+          # 某个已发布版本，而不是用于自动化比对。
+
+          # 用 .NET API 显式无 BOM 追加，理由见"准备参考程序集"一节。
+          # （这里写的是 job summary，PS 5.1 的 >> 会写成 UTF-16，GitHub 页面会乱码）
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          $md = @(
+            "| 文件 | 大小 | SHA256 |",
+            "|---|---|---|",
+            "| $($item.Name) | $($item.Length) 字节 | ``$hash`` |"
+          ) -join "`n"
+          [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, $md + "`n", $utf8NoBom)
+
+      - name: 运行 NtpClient 协议解析测试
+        shell: pwsh
+        run: |
+          # 测试通过 <Compile Include="..\WindowsFormsApp1\Services\NtpClient.cs" />
+          # 直接编译产品源码，因此这一步同时验证了"产品代码本身可编译"。
+          dotnet run --project tools\NtpClientTests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "NtpClient 测试未通过"
+            exit 1
+          }

@@ -49,7 +49,12 @@ namespace SeewoOpt.Services
     /// 设置的注册表持久化。
     ///
     /// 位置：HKCU\Software\TimeSyncTool
-    /// 注意：路径沿用历史值 TimeSyncTool，重命名会导致老用户设置丢失。
+    ///
+    /// 【为什么不跟着命名空间改名】
+    /// 代码命名空间已统一为 SeewoOpt，但这里**必须保留 TimeSyncTool**。
+    /// 命名空间是编译期概念，改名只影响源码；注册表路径是运行时数据，
+    /// 改了等于换了一个存储位置——已装用户的全部设置会被静默重置为默认值。
+    /// 二者不可混淆。同理见 AutoStartService.TaskName 与更新缓存目录。
     /// </summary>
     public static class SettingsStore
     {

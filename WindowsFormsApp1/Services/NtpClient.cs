@@ -96,20 +96,17 @@ namespace SeewoOpt.Services
         /// </summary>
         public static NtpResult Query(string ntpServer, int timeoutMs = DefaultTimeoutMs)
         {
-            var result = new NtpResult();
+            byte[] packet = new byte[NtpProtocol.PacketSize];
 
             try
             {
-                byte[] packet = new byte[NtpProtocol.PacketSize];
-
                 // 客户端请求：LI=0, VN=4, Mode=3
                 packet[NtpProtocol.OffsetLeapIndicator] = 0x1B;
 
                 IPAddress address = ResolveIPv4(ntpServer);
                 if (address == null)
                 {
-                    result.ValidationError = "无法解析 NTP 服务器地址: " + ntpServer;
-                    return result;
+                    return new NtpResult { ValidationError = "无法解析 NTP 服务器地址: " + ntpServer };
                 }
 
                 var endPoint = new IPEndPoint(address, 123);
@@ -122,72 +119,105 @@ namespace SeewoOpt.Services
                     int bytesReceived = Exchange(socket, endPoint, packet, timeoutMs);
                     if (bytesReceived < NtpProtocol.PacketSize)
                     {
-                        result.ValidationError = string.Format(
-                            "NTP 响应不完整（{0}/{1} 字节）", bytesReceived, NtpProtocol.PacketSize);
-                        return result;
+                        return new NtpResult
+                        {
+                            ValidationError = string.Format(
+                                "NTP 响应不完整（{0}/{1} 字节）", bytesReceived, NtpProtocol.PacketSize)
+                        };
                     }
                 }
-                // 协议字段校验——这部分是原实现缺失的
-                result.LeapIndicator = (byte)((packet[0] >> 6) & 0x03);
-                result.Version = (byte)((packet[0] >> 3) & 0x07);
-                result.Mode = (byte)(packet[0] & 0x07);
-                result.Stratum = packet[NtpProtocol.OffsetStratum];
-
-                if (result.Mode != NtpProtocol.ModeServer)
-                {
-                    result.ValidationError = string.Format(
-                        "响应 Mode={0} 不是服务器应答（期望 {1}）", result.Mode, NtpProtocol.ModeServer);
-                    return result;
-                }
-
-                if (result.Stratum == 0 || result.Stratum >= 16)
-                {
-                    result.ValidationError = string.Format(
-                        "服务器未同步（Stratum={0}），时间不可用", result.Stratum);
-                    return result;
-                }
-
-                if (result.LeapIndicator == 3)
-                {
-                    result.ValidationError = "服务器标记时钟不同步（LI=3），时间不可用";
-                    return result;
-                }
-
-                DateTime utcTime = ParseTimestamp(packet, 40);
-
-                // 合理性校验：只用绝对边界，绝不与本机时钟比较。
-                //
-                // 设计教训：此校验最初写成"上限 = DateTime.UtcNow.AddDays(1)"，
-                // 结果本机时间被设为 2000-01-01 时（这正是本工具要修正的典型场景），
-                // 服务器返回的真实时间被判为"超出范围"而全部拒绝，
-                // 等于把工具的核心功能堵死。用本机时钟判断 NTP 时间是循环论证——
-                // 正因为本机时钟不准才需要校时。
-                //
-                // 边界取自协议本身而非本机状态：
-                //   下限 2000-01-01：能拦住纪元处理错误造成的 1956/1970 等畸形值，
-                //     同时不会误伤任何真实服务器。
-                //   上限 2036-02-07 06:28:16：NTP era 0 的理论终点（2^32 秒）。
-                //     32 位秒字段无法表达更晚的时间——真到那时需启用 era 1，
-                //     当前实现未支持，因此明确拒绝好过静默解析出错误时间。
-                DateTime earliest = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-                DateTime latest = new DateTime(2036, 2, 7, 6, 28, 16, DateTimeKind.Utc);
-
-                if (utcTime < earliest || utcTime > latest)
-                {
-                    result.ValidationError = string.Format(
-                        "服务器时间 {0:yyyy-MM-dd HH:mm:ss} 超出可接受范围（{1:yyyy-MM-dd} ~ {2:yyyy-MM-dd}），解析可能有误",
-                        utcTime, earliest, latest);
-                    return result;
-                }
-
-                result.UtcTime = utcTime;
-                result.IsValid = true;
             }
             catch (Exception ex)
             {
-                result.ValidationError = ex.Message;
+                // 网络层的失败（超时、DNS、Socket 异常）在这里收敛成结果对象，
+                // 不向调用方抛——上层要遍历 10 个服务器，抛异常会打断整个循环。
+                return new NtpResult { ValidationError = ex.Message };
             }
 
+            // 字节已拿到，交给纯函数解析。异常不会从这里逃逸。
+            return ParseResponse(packet);
+        }
+
+        /// <summary>
+        /// 解析并校验一个 NTP 响应报文。**纯函数**：只依赖传入的字节，
+        /// 不碰网络、不读本机时钟、不抛异常。
+        ///
+        /// 【为什么要单独抽出来】
+        /// 协议解析是整条校时链路里唯一完全确定的部分——给定字节，结果唯一。
+        /// 但它原先内嵌在 Query 里，与 Socket 操作混在一起，
+        /// 导致只能靠连真实服务器来"验证"，而网络又不稳定，
+        /// 失败时根本无法区分是解析错、还是包丢了、还是服务器拒答。
+        /// 抽成纯函数后可以构造任意畸形报文来测边界。
+        ///
+        /// 注意刻意不访问 DateTime.UtcNow：本工具的核心场景就是本机时钟错误，
+        /// 用本机时间做合理性判断是循环论证（详见下方 earliest/latest 注释）。
+        /// </summary>
+        internal static NtpResult ParseResponse(byte[] packet)
+        {
+            var result = new NtpResult();
+
+            if (packet == null || packet.Length < NtpProtocol.PacketSize)
+            {
+                result.ValidationError = string.Format(
+                    "NTP 响应不完整（{0}/{1} 字节）",
+                    packet == null ? 0 : packet.Length, NtpProtocol.PacketSize);
+                return result;
+            }
+
+            result.LeapIndicator = (byte)((packet[0] >> 6) & 0x03);
+            result.Version = (byte)((packet[0] >> 3) & 0x07);
+            result.Mode = (byte)(packet[0] & 0x07);
+            result.Stratum = packet[NtpProtocol.OffsetStratum];
+
+            if (result.Mode != NtpProtocol.ModeServer)
+            {
+                result.ValidationError = string.Format(
+                    "响应 Mode={0} 不是服务器应答（期望 {1}）", result.Mode, NtpProtocol.ModeServer);
+                return result;
+            }
+
+            if (result.Stratum == 0 || result.Stratum >= 16)
+            {
+                result.ValidationError = string.Format(
+                    "服务器未同步（Stratum={0}），时间不可用", result.Stratum);
+                return result;
+            }
+
+            if (result.LeapIndicator == 3)
+            {
+                result.ValidationError = "服务器标记时钟不同步（LI=3），时间不可用";
+                return result;
+            }
+
+            DateTime utcTime = ParseTimestamp(packet, 40);
+
+            // 合理性校验：只用绝对边界，绝不与本机时钟比较。
+            //
+            // 设计教训：此校验最初写成"上限 = DateTime.UtcNow.AddDays(1)"，
+            // 结果本机时间被设为 2000-01-01 时（这正是本工具要修正的典型场景），
+            // 服务器返回的真实时间被判为"超出范围"而全部拒绝，
+            // 等于把工具的核心功能堵死。用本机时钟判断 NTP 时间是循环论证——
+            // 正因为本机时钟不准才需要校时。
+            //
+            // 边界取自协议本身而非本机状态：
+            //   下限 2000-01-01：能拦住纪元处理错误造成的 1956/1970 等畸形值，
+            //     同时不会误伤任何真实服务器。
+            //   上限 2036-02-07 06:28:16：NTP era 0 的理论终点（2^32 秒）。
+            //     32 位秒字段无法表达更晚的时间——真到那时需启用 era 1，
+            //     当前实现未支持，因此明确拒绝好过静默解析出错误时间。
+            DateTime earliest = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            DateTime latest = new DateTime(2036, 2, 7, 6, 28, 16, DateTimeKind.Utc);
+
+            if (utcTime < earliest || utcTime > latest)
+            {
+                result.ValidationError = string.Format(
+                    "服务器时间 {0:yyyy-MM-dd HH:mm:ss} 超出可接受范围（{1:yyyy-MM-dd} ~ {2:yyyy-MM-dd}），解析可能有误",
+                    utcTime, earliest, latest);
+                return result;
+            }
+
+            result.UtcTime = utcTime;
+            result.IsValid = true;
             return result;
         }
 

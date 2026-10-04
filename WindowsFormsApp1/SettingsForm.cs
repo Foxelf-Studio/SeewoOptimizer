@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Windows.Forms;
 
-namespace TimeSyncTool
+namespace SeewoOpt
 {
     public partial class SettingsForm : Form
     {

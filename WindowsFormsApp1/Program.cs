@@ -9,9 +9,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using SeewoOpt.Services;
-using TimeSyncTool;
 
-namespace WindowsFormsApp1
+namespace SeewoOpt
 {
     static class Program
     {

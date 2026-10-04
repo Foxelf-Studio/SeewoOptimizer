@@ -1,4 +1,4 @@
-﻿namespace TimeSyncTool
+﻿namespace SeewoOpt
 {
     partial class SettingsForm
     {

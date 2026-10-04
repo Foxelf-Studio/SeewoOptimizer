@@ -29,7 +29,14 @@ namespace SeewoOpt.Services
     /// </summary>
     public static class AutoStartService
     {
-        /// <summary>计划任务名称（沿用历史值，改动会导致老用户的自启失效）</summary>
+        /// <summary>
+        /// 计划任务名称。
+        ///
+        /// 【为什么不跟着命名空间改名】
+        /// 代码命名空间已统一为 SeewoOpt，但此项**必须保留 TimeSyncTool**。
+        /// 任务名是 Windows 任务计划程序里已注册的键，改名后新名字查不到旧任务，
+        /// 表现为"关掉自启再打开"时残留一个旧任务、或老用户直接失去自启能力。
+        /// </summary>
         public const string TaskName = "TimeSyncTool";
 
         /// <summary>登录后延迟多少秒启动</summary>

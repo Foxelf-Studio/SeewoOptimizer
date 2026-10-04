@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AssemblyName>NtpClientTests</AssemblyName>
+    <RootNamespace>SeewoOpt.Tools</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="NtpClientTests.cs" />
+
+    <!--
+      直接链接产品源码，而不是复刻一份。
+
+      这是本测试与 UpdateRetrySimulation 的关键区别：那个测的是并发时序，
+      在 net10 下无法直接加载 net48 程序集，只能复刻同构状态机；
+      而 NtpClient 的协议解析是纯函数，零外部依赖（只用 System.Net），
+      可以直接把真实源文件编进来——测的就是发布出去的那份代码本身。
+
+      若改为复刻，一旦产品代码改动而副本忘了同步，
+      测试依然全绿，却什么也没验证到。
+    -->
+    <Compile Include="..\WindowsFormsApp1\Services\NtpClient.cs" />
+  </ItemGroup>
+</Project>
