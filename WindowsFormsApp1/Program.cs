@@ -80,6 +80,7 @@ namespace WindowsFormsApp1
                 WriteLog("========================================");
                 WriteLog($"程序启动 - 时间: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
                 WriteLog($"========================================");
+                WriteLog(BuildInfo.Describe());
                 WriteLog($"命令行参数: {string.Join(" ", Environment.GetCommandLineArgs())}");
                 WriteLog($"当前目录: {Environment.CurrentDirectory}");
                 WriteLog($"程序路径: {Application.ExecutablePath}");
@@ -304,14 +305,48 @@ namespace WindowsFormsApp1
             }
             catch (Exception ex)
             {
-                WriteLog($"后台检查更新失败：{ex.Message}");
-                WriteLog($"异常详情：{ex}");
+                // 本机时钟严重错误时，几乎所有 HTTPS 都会以"证书无效"失败：
+                // 证书的 notBefore/notAfter 是绝对时间，1980 年的本机时钟会让
+                // 每一张证书都变成"尚未生效"。这不是网络故障，但日志里表现为
+                // trust relationship 失败，极易被误判成网络问题而查错方向。
+                // 这里识别出来并说明真实原因——时间同步成功后重试即可。
+                if (IsCertificateTimeFailure(ex))
+                {
+                    WriteLog("更新检查跳过：本机时间与证书有效期不匹配，" +
+                             $"当前 {DateTime.Now:yyyy-MM-dd}，HTTPS 证书校验必然失败。" +
+                             "完成时间同步后会自动恢复，本次不影响校时功能。");
+                }
+                else
+                {
+                    WriteLog($"后台检查更新失败：{ex.Message}");
+                    WriteLog($"异常详情：{ex}");
+                }
             }
             finally
             {
                 UpdateCheckCompleted = true;
                 WriteLog("更新检查完成");
             }
+        }
+
+        /// <summary>
+        /// 判断异常是否源于"本机时钟错误导致证书不在有效期内"。
+        ///
+        /// 这类失败的特征是异常链里同时出现 TLS 握手失败与证书校验失败，
+        /// 而底层往往是同一个"remote certificate is invalid"。
+        /// </summary>
+        private static bool IsCertificateTimeFailure(Exception ex)
+        {
+            for (Exception e = ex; e != null; e = e.InnerException)
+            {
+                string msg = e.Message ?? string.Empty;
+                if (msg.IndexOf("certificate", StringComparison.OrdinalIgnoreCase) >= 0
+                    || msg.IndexOf("trust relationship", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>

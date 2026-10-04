@@ -90,10 +90,16 @@ namespace TimeSyncTool
         private const int PRIMARY_SERVER_COUNT = 4;
 
         // 定义多个NTP服务器
+        //
+        // 顺序调整记录：原列表把 time.windows.com / time.apple.com / time.google.com /
+        // time-a.nist.gov 排在前 4 位，国内源全部垫底。实测日志显示这 4 个境外源
+        // 在国内网络下极不可靠——time.google.com 连续 3 个包全部超时，
+        // 每次超时白等 5 秒，前 4 个服务器合计浪费 20 秒才轮到自己人。
+        // 现改为国内可直连的源优先，境外源保留作兜底。
         private static readonly string[] NtpServers = {
-            "time.windows.com", "time.apple.com", "time.google.com", "time-a.nist.gov",
-            "time-b.nist.gov", "pool.ntp.org", "cn.pool.ntp.org", "ntp.aliyun.com",
-            "ntp1.aliyun.com", "ntp2.aliyun.com"
+            "ntp.aliyun.com", "ntp1.aliyun.com", "ntp.ntsc.ac.cn", "cn.pool.ntp.org",
+            "time.windows.com", "time.apple.com", "time.google.com",
+            "time-a.nist.gov", "time-b.nist.gov", "pool.ntp.org"
         };
 
         // 用于线程安全的UI更新

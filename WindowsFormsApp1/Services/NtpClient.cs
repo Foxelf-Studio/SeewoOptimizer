@@ -76,6 +76,21 @@ namespace SeewoOpt.Services
         private const int DefaultTimeoutMs = 5000;
 
         /// <summary>
+        /// 单次查询内部的发包次数。
+        ///
+        /// 【修正记录】原实现每次 Query 只发 1 个包。实测日志显示一个稳定规律：
+        /// 每个服务器的"第 1 次尝试"几乎必然超时，而"第 2 次"立刻就有响应，
+        /// 且这个规律对全部 10 个服务器一致。原因是 UDP 的 BeginConnect 只是本地
+        /// 记录默认对端（不产生任何报文），随后的首个 Send 需要先完成 ARP 解析
+        /// 才能落地，而 Windows 在 ARP 未就绪时会把这一包丢掉——于是每个新服务器
+        /// 都白白搭上 5 秒超时。
+        ///
+        /// 现在改为在同一次 Query 内连续发 2 包、共用同一总预算，
+        /// 第 1 包丢失时第 2 包立即补上，不必退回上层重试逻辑重来一遍。
+        /// </summary>
+        private const int SendAttemptsPerQuery = 2;
+
+        /// <summary>
         /// 查询 NTP 服务器，返回经协议校验的时间。
         /// 失败或校验不通过时返回 IsValid=false 的结果，不抛异常。
         /// </summary>
@@ -112,7 +127,6 @@ namespace SeewoOpt.Services
                         return result;
                     }
                 }
-
                 // 协议字段校验——这部分是原实现缺失的
                 result.LeapIndicator = (byte)((packet[0] >> 6) & 0x03);
                 result.Version = (byte)((packet[0] >> 3) & 0x07);
@@ -222,7 +236,12 @@ namespace SeewoOpt.Services
             return addresses.Length > 0 ? addresses[0] : null;
         }
 
-        /// <summary>UDP 的一次请求-应答，带超时控制</summary>
+        /// <summary>
+        /// UDP 的一次请求-应答，带超时控制。
+        ///
+        /// 总超时预算 timeoutMs 在多次发包之间分摊，而不是每包各给 timeoutMs，
+        /// 否则单次 Query 的最坏耗时会变成 SendAttemptsPerQuery × timeoutMs。
+        /// </summary>
         private static int Exchange(Socket socket, EndPoint endPoint, byte[] buffer, int timeoutMs)
         {
             // UDP 无连接，"Connect" 只是绑定默认对端并设置超时
@@ -231,16 +250,44 @@ namespace SeewoOpt.Services
                 throw new TimeoutException("连接 NTP 服务器超时");
             socket.EndConnect(connectResult);
 
-            IAsyncResult sendResult = socket.BeginSend(buffer, 0, buffer.Length, SocketFlags.None, null, null);
-            if (!sendResult.AsyncWaitHandle.WaitOne(timeoutMs, false))
-                throw new TimeoutException("发送 NTP 请求超时");
-            socket.EndSend(sendResult);
+            int perAttemptMs = Math.Max(1000, timeoutMs / SendAttemptsPerQuery);
+            int received = 0;
+            Exception lastError = null;
 
-            IAsyncResult receiveResult = socket.BeginReceive(buffer, 0, buffer.Length, SocketFlags.None, null, null);
-            if (!receiveResult.AsyncWaitHandle.WaitOne(timeoutMs, false))
-                throw new TimeoutException("接收 NTP 响应超时");
+            for (int attempt = 1; attempt <= SendAttemptsPerQuery; attempt++)
+            {
+                try
+                {
+                    IAsyncResult sendResult = socket.BeginSend(buffer, 0, buffer.Length, SocketFlags.None, null, null);
+                    if (sendResult.AsyncWaitHandle.WaitOne(perAttemptMs, false))
+                        socket.EndSend(sendResult);
 
-            return socket.EndReceive(receiveResult);
+                    // Receive 必须重新发起：上一轮的 BeginReceive 在超时后已失效，
+                    // 复用同一个 IAsyncResult 会直接抛 InvalidOperationException。
+                    IAsyncResult receiveResult = socket.BeginReceive(buffer, 0, buffer.Length, SocketFlags.None, null, null);
+                    if (receiveResult.AsyncWaitHandle.WaitOne(perAttemptMs, false))
+                    {
+                        received = socket.EndReceive(receiveResult);
+                        if (received > 0)
+                            return received;
+                    }
+                }
+                catch (SocketException ex)
+                {
+                    // 上一包的应答可能已在路上，再发一次即可；记下来全部失败后上报
+                    lastError = ex;
+                }
+                catch (ObjectDisposedException ex)
+                {
+                    lastError = ex;
+                    break;
+                }
+            }
+
+            if (lastError != null && received == 0)
+                throw new TimeoutException("接收 NTP 响应超时（已重发 " + SendAttemptsPerQuery + " 次）: " + lastError.Message);
+
+            throw new TimeoutException("接收 NTP 响应超时（已发送 " + SendAttemptsPerQuery + " 包）");
         }
     }
 
