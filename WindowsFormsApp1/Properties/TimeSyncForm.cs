@@ -16,6 +16,60 @@ namespace SeewoOpt
         private NotifyIcon trayIcon;
         private ContextMenuStrip trayMenu;
         private Thread syncThread;
+
+        /// <summary>
+        /// 当前存活的窗体实例，供 <see cref="WaitForBackgroundWork"/> 找到同步线程。
+        ///
+        /// 【为什么需要它】同步线程是窗体的私有字段，而"写日志结束标记"发生在
+        /// Program.Main 的 finally 里。要让结束标记压在同步线程最后一条日志之后，
+        /// Main 就得能拿到这个线程。用静态引用而不是把 thread 提为公共字段，
+        /// 是为了让同步线程的生命周期仍归窗体自己管。
+        /// </summary>
+        private static TimeSyncForm _activeInstance;
+
+        /// <summary>
+        /// 等待本窗体的后台工作线程（同步线程）结束。
+        ///
+        /// 【为什么必须等】日志分段用"======== RUN 结束 ========"当分界尺，
+        /// 它必须压在本次运行所有日志之下。但同步线程是独立线程，
+        /// 主线程走完 Application.Run 返回、写完结束标记之后，它可能还在跑，
+        /// 于是它的最后两条日志（"同步线程正常结束"、"同步线程 finally 块"）
+        /// 就落到了结束标记**之下**，看上去像属于下一次运行——实测确实如此。
+        ///
+        /// 【死锁风险，务必看清】绝不能在消息循环已经停止之后阻塞等待。
+        /// 同步线程收尾时会调用 UpdateProgressBar / UpdateButton，
+        /// 这两者内部用的是**同步** this.Invoke —— 它会把工作项投进 UI 队列
+        /// 并等 UI 线程处理。而 Main 的 finally 执行时 Application.Run 已经返回、
+        /// 消息循环已经停了，UI 线程一旦停在这里 Join，那些 Invoke 就永远
+        /// 等不到人来处理，双方互锁。
+        ///
+        /// 所以这里加了双重保险：
+        ///   1. 只有在取消请求**之后**线程仍在活时才等——正常路径下同步线程
+        ///      早已结束，根本不会走到 Join；
+        ///   2. 等待用带超时的 Join，且超时即返回，不无限等。
+        /// </summary>
+        /// <param name="timeoutMs">最长等待毫秒数</param>
+        public static void WaitForBackgroundWork(int timeoutMs)
+        {
+            TimeSyncForm form = _activeInstance;
+            if (form == null) return;
+
+            Thread t = form.syncThread;
+            if (t == null || !t.IsAlive) return;
+
+            // 先请求取消，让线程尽快从 WaitOrCancel 之类的等待中醒来，
+            // 否则它可能睡满一整个延迟周期，白白耗掉等待窗口。
+            try { form.CancelSync(); }
+            catch { }
+
+            // 取消之后线程若已结束，就不必等了——这一步挡掉了绝大多数情况，
+            // 也让"同步线程已收尾"的正常路径完全不碰 Join 的死锁风险。
+            if (!t.IsAlive) return;
+
+            if (!t.Join(timeoutMs))
+                LogService.Write($"等待同步线程收尾超时（{timeoutMs}ms），继续退出");
+        }
+
         // 跨线程共享状态：以下字段在 UI 线程与 syncThread 之间双向读写，
         // 必须声明为 volatile，否则 JIT 可能缓存寄存器值导致退出/完成信号无法及时生效。
         private volatile bool syncCompleted = false;
@@ -120,6 +174,9 @@ namespace SeewoOpt
 
         public TimeSyncForm()
         {
+            // 记录当前实例，供 Program.Main 在写日志结束标记前等待同步线程收尾
+            _activeInstance = this;
+
             // 获取程序集版本号
             _versionString = Assembly.GetExecutingAssembly().GetName().Version.ToString();
 
@@ -314,6 +371,11 @@ namespace SeewoOpt
                     trayIcon.Visible = false;
                     trayIcon.Dispose();
                 }
+
+                // 窗体已关闭，清掉静态引用，避免 WaitForBackgroundWork
+                // 之后的调用拿到一个已经 Dispose 的实例。
+                if (object.ReferenceEquals(_activeInstance, this))
+                    _activeInstance = null;
             };
         }
 
@@ -877,8 +939,25 @@ namespace SeewoOpt
                     {
                         try
                         {
-                            UpdateProgressBar(false);
-                            UpdateButton(true);
+                            // 用 BeginInvoke（异步投递）而非同步 Invoke。
+                            //
+                            // 退出时主线程会在 WaitForBackgroundWork 里 Join 本线程，
+                            // 而此刻消息循环可能已经停止。同步 Invoke 会一直等 UI 线程
+                            // 来取这个工作项，但 UI 线程正卡在 Join 上——双方互锁，
+                            // 只能等 Join 超时才解开。改用 BeginInvoke 投递后立即返回，
+                            // 不再依赖 UI 线程是否还会处理它。
+                            //
+                            // 这里的两个调用只是恢复按钮/进度条的可用状态，
+                            // 而退出路径下窗体马上就要销毁，投递失败也无影响，
+                            // 所以"不保证被处理"是可以接受的代价。
+                            if (this.IsHandleCreated && !this.IsDisposed)
+                            {
+                                this.BeginInvoke(new MethodInvoker(() =>
+                                {
+                                    try { UpdateProgressBar(false); } catch { }
+                                    try { UpdateButton(true); } catch { }
+                                }));
+                            }
                         }
                         catch { }
                     }

@@ -56,6 +56,15 @@ namespace SeewoOpt
         private static Mutex singleInstanceMutex;
 
         /// <summary>
+        /// 退出时等待后台同步线程收尾的最长时间（毫秒）。
+        ///
+        /// 取 3 秒：这里已先发了取消请求，正常情况几十毫秒内就会退出。
+        /// 留这个上限只是为了防止线程卡在某个不可中断的调用上时拖死退出——
+        /// 同步线程是 IsBackground，超时不会阻塞进程结束，只是日志缺个尾巴。
+        /// </summary>
+        private const int BACKGROUND_DRAIN_TIMEOUT_MS = 3000;
+
+        /// <summary>
         /// 本次运行的结束原因，写进日志分段的结尾标记。
         /// 各退出路径设置它，finally 里统一读取——这样不必在每个 return 前
         /// 重复写收尾日志，也不会漏掉某条退出路径。
@@ -153,11 +162,17 @@ namespace SeewoOpt
             }
             finally
             {
-                // 【顺序】必须先释放互斥体，再写结束标记。
-                // ReleaseMutex 自身会写一条"互斥体已释放"日志，若放在
-                // EndSession 之后，这条日志就会落在"======== RUN 结束 ========"
-                // 之下、跑到本次运行的分段之外——看上去像属于下一次运行，
-                // 实则不是。凡是本次运行产生的日志都应落在结束标记之前。
+                // 【顺序】必须先让后台工作线程收尾，再写结束标记。
+                //
+                // 同步线程是独立线程，主线程走完 Application.Run 返回时它可能还在跑。
+                // 若此刻就写结束标记，它的最后两条日志（"同步线程正常结束"、
+                // "同步线程 finally 块"）会落到标记**之下**，看上去像属于下一次运行——
+                // 实测确实如此，三条日志时间戳完全相同。
+                //
+                // 这里先请求取消再 Join，给线程一个收尾窗口。它是 IsBackground，
+                // 所以超时也不会拖住进程退出，只是日志会缺个尾巴。
+                TimeSyncForm.WaitForBackgroundWork(BACKGROUND_DRAIN_TIMEOUT_MS);
+
                 ReleaseMutex();
 
                 // 收尾日志分段。放在 finally 里是因为它是唯一保证会执行的路径：
@@ -603,13 +618,21 @@ namespace SeewoOpt
             if (!string.IsNullOrEmpty(reason))
                 _exitReason = reason;
 
-            // 【顺序】先释放互斥体，再写结束标记——因为 ReleaseMutex 自己会写
-            // 一条"互斥体已释放"日志，若放在后面就会跑到分隔之外。
+            // 【顺序】让后台同步线程先收尾，再写结束标记——否则它的日志会落到
+            // 分隔之下。理由与 Main 的 finally 完全相同。
             //
-            // 这里能安全地把 ReleaseMutex 提前，是因为它内部会先
+            // 自动更新路径也要经过这里：那条路径会把同步线程一并取消，
+            // 但取消是异步的，不等一下照样会漏日志。因为下面紧接着就是
+            // Environment.Exit，Join 超时的兜底尤其重要——绝不能无限等。
+            TimeSyncForm.WaitForBackgroundWork(BACKGROUND_DRAIN_TIMEOUT_MS);
+
+            // 再释放互斥体。ReleaseMutex 自身会写一条"互斥体已释放"日志，
+            // 放在结束标记之后就会跑到分隔之外；放在这里则恰好压在标记之前。
+            //
+            // 能安全把 ReleaseMutex 提前，是因为它内部会先
             // singleInstanceMutex.Close() 把句柄交还系统；Windows 在进程终止时
-            // 也会自动放弃未释放的互斥体。也就是说，即便紧随其后的
-            // Environment.Exit 把后续语句截断，单实例保护仍然成立。
+            // 也会自动放弃未释放的互斥体。即便紧随其后的 Environment.Exit
+            // 把后续语句截断，单实例保护仍然成立。
             ReleaseMutex();
 
             // 结束标记最后写：它是"本次运行到此为止"的分界线，必须压在
