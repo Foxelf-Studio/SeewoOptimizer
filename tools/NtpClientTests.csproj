@@ -23,5 +23,6 @@
       测试依然全绿，却什么也没验证到。
     -->
     <Compile Include="..\WindowsFormsApp1\Services\NtpClient.cs" />
+    <Compile Include="..\WindowsFormsApp1\Services\LogService.cs" />
   </ItemGroup>
 </Project>

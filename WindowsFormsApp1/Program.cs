@@ -55,17 +55,31 @@ namespace SeewoOpt
         // 互斥体对象
         private static Mutex singleInstanceMutex;
 
+        /// <summary>
+        /// 本次运行的结束原因，写进日志分段的结尾标记。
+        /// 各退出路径设置它，finally 里统一读取——这样不必在每个 return 前
+        /// 重复写收尾日志，也不会漏掉某条退出路径。
+        /// </summary>
+        private static string _exitReason = "未标明";
+
         [STAThread]
         static void Main()
         {
             try
             {
+                // 开始本次运行的日志分段：裁剪旧运行 + 写分隔头。
+                // 放在最前面（早于单实例检查）是为了让每一次 Main 进入都
+                // 有完整的一段——否则"已有实例运行"那条退出路径只会在
+                // 上一次的日志段末尾甩一个孤立的结束标记。
+                LogService.BeginSession();
+
                 // 检查是否有待应用的更新（更新后重启）- 只处理不弹窗
                 HandlePendingUpdate();
 
                 // 检查是否已有实例在运行
                 if (!IsSingleInstance())
                 {
+                    _exitReason = "已有实例在运行";
                     WriteLog("已有实例运行，退出");
                     MessageBox.Show("程序已在运行中。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
@@ -80,16 +94,12 @@ namespace SeewoOpt
                 // 异步检查新版本（不阻塞主线程）
                 StartUpdateCheck("启动时");
 
-                WriteLog("========================================");
-                WriteLog($"程序启动 - 时间: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
-                WriteLog($"========================================");
                 WriteLog(BuildInfo.Describe());
                 WriteLog($"命令行参数: {string.Join(" ", Environment.GetCommandLineArgs())}");
                 WriteLog($"当前目录: {Environment.CurrentDirectory}");
                 WriteLog($"程序路径: {Application.ExecutablePath}");
                 WriteLog($"程序目录: {Path.GetDirectoryName(Application.ExecutablePath)}");
                 WriteLog($"当前版本: {Assembly.GetExecutingAssembly().GetName().Version}");
-                WriteLog($"========================================");
 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
@@ -118,17 +128,18 @@ namespace SeewoOpt
                     WriteLog("开始运行主窗体");
                     Application.Run(new TimeSyncForm());
                     WriteLog("主窗体运行结束");
+                    _exitReason = "用户退出（主窗体关闭）";
                 }
                 catch (Exception ex)
                 {
                     WriteLog($"========== Run 异常 ==========");
                     WriteLog($"异常消息: {ex.Message}");
+                    _exitReason = $"主窗体异常：{ex.Message}";
                     MessageBox.Show($"程序运行错误：{ex.Message}", "错误",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
 
                 WriteLog("程序正常退出");
-                WriteLog("========================================\n");
             }
             catch (Exception ex)
             {
@@ -136,12 +147,19 @@ namespace SeewoOpt
                 WriteLog($"异常类型: {ex.GetType().Name}");
                 WriteLog($"异常消息: {ex.Message}");
                 WriteLog($"异常堆栈: {ex.StackTrace}");
+                _exitReason = $"启动阶段异常（{ex.GetType().Name}）：{ex.Message}";
                 MessageBox.Show($"程序启动时发生致命错误：{ex.Message}\n\n程序将关闭。",
                     "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
-                // 释放互斥体
+                // 收尾日志分段。放在 finally 里是因为它是唯一保证会执行的路径：
+                // 正常退出、Main 抛异常、Run 抛异常都会走到这里。
+                // 被强杀（任务管理器结束进程、断电）时不会执行——那种情况
+                // 日志里就没有结束标记，下次启动一眼能看出上次是异常终止的。
+                // 重复调用是安全的：LogService.EndSession 自身幂等。
+                LogService.EndSession(_exitReason);
+
                 ReleaseMutex();
             }
         }
@@ -557,7 +575,7 @@ namespace SeewoOpt
             Process.Start(updateProcess);
 
             // 退出当前程序，让更新脚本替换文件
-            Shutdown(0);
+            Shutdown(0, $"准备自动更新到 {newVersion}，交由更新脚本替换文件");
         }
 
         /// <summary>
@@ -566,9 +584,24 @@ namespace SeewoOpt
         /// 直接调用 Environment.Exit 会跳过 Main 的 finally，导致单实例互斥体
         /// 不被释放——在自更新场景下，批处理脚本 taskkill 杀不掉残留进程，
         /// exe 文件被占用而替换失败。这里统一先释放资源再退出。
+        ///
+        /// 同理，日志的结束标记也必须在此显式写入，不能只依赖 Main 的 finally。
         /// </summary>
         public static void Shutdown(int exitCode)
         {
+            Shutdown(exitCode, null);
+        }
+
+        /// <summary>带结束原因的退出入口</summary>
+        public static void Shutdown(int exitCode, string reason)
+        {
+            if (!string.IsNullOrEmpty(reason))
+                _exitReason = reason;
+
+            // 先写结束标记，再释放资源——顺序反了可能来不及落盘就被 Environment.Exit 截断。
+            // 幂等由 LogService 内部保证，所以即使接着走到 Main 的 finally 也不会重复。
+            LogService.EndSession(_exitReason);
+
             ReleaseMutex();
             Application.Exit();
             Environment.Exit(exitCode);

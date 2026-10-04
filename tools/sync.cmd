@@ -43,11 +43,11 @@ REM relative to it and the Chinese directory name never appears in
 REM this file's body. Two copies of this script exist:
 REM
 REM   <root>\sync.cmd               repo is in .\_repo
-REM   <root>\_repo\tools\sync.cmd   repo is the parent, ..
+REM   <root>\_repo\tools\sync.cmd   repo is in ..\..
 REM
 REM The REPO line below is the ONLY difference between the two
 REM copies; everything else is byte identical.
-set REPO=%~dp0..
+set REPO=%~dp0_repo
 set WB=G:\SeewoBuild\proj
 
 if not exist "%REPO%\WindowsFormsApp1" (

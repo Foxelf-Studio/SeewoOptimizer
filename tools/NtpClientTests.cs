@@ -45,6 +45,13 @@ internal static class NtpClientTests
         TestClockFieldsAreUtcNotLocal();
         TestClockFieldsHandleKind();
 
+        // --- 日志运行分段 ---
+        TestLogTrimKeepsLimit();
+        TestLogTrimEdgeCases();
+        TestLogSessionCounting();
+        TestLogNumberingMonotonic();
+        TestLogBaseRoundTrip();
+
         // --- 畸形输入 ---
         TestRejectsShortPacket();
         TestRejectsNullPacket();
@@ -440,6 +447,289 @@ internal static class NtpClientTests
     }
 
     // ---------------------------------------------------------------
+    // 日志运行分段（2026-10-04 新增功能：把每次启动的日志分开）
+    //
+    // 【测什么】LogService.TrimContent —— 给定日志全文，返回应保留的部分。
+    // 它是纯函数，直接链接产品源码测试，不碰真实日志文件。
+    //
+    // 【为什么必须测】裁剪边界连续出过两次 off-by-one：
+    //   1. 分隔头同时用作首尾边框 → 同一标记每段出现两次 → 计数翻倍
+    //   2. 按 KeepSessions 裁剪 → 每次固定多留一段（8 次跑出 6 段）
+    // 两次都是"看起来对、跑起来多一段"的类型，肉眼极难发现。
+    // ---------------------------------------------------------------
+
+    private const string LogBegin = "======== RUN 开始 ========";
+    private const string LogEnd = "======== RUN 结束 ========";
+
+    /// <summary>构造一段模拟的日志运行段落，结构同 LogService 实际写出的内容</summary>
+    private static string MakeLogSession(int n)
+    {
+        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+        sb.AppendLine();
+        sb.AppendLine(LogBegin);
+        sb.AppendLine($"启动时间: 2026-10-04 14:0{n % 10}:00.000");
+        sb.AppendLine($"运行序号: 第 {n} 次");
+        // 基准行：真实格式里每段都有，值是"这一段自己的序号"。
+        // fixture 必须跟着写，否则测不出"基准丢失导致序号卡住"这类问题。
+        sb.AppendLine($"序号基准: {n}");
+        // 分隔线必须引用产品常量，不能把字面量抄一遍——
+        // 抄一遍的话，产品改了分隔线而测试没跟着改，测试依然全绿，
+        // 就等于没测。这里刻意暴露 LogService.Divider 就是为断掉这条退路。
+        sb.AppendLine(LogService.Divider);
+        sb.AppendLine($"2026-10-04 14:0{n % 10}:00.100 - 第 {n} 次运行的日志");
+        sb.AppendLine(LogEnd);
+        return sb.ToString();
+    }
+
+    private static string MakeLogContent(int sessions)
+    {
+        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+        for (int i = 1; i <= sessions; i++) sb.Append(MakeLogSession(i));
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// 核心契约：裁剪后原有段数不得超过 Keep-1（因为紧接着还要追加新段）。
+    /// 这条测试直接对应"8 次跑出 6 段"那个 bug。
+    /// </summary>
+    private static void TestLogTrimKeepsLimit()
+    {
+        const int Keep = 5;
+
+        for (int sessions = 1; sessions <= 12; sessions++)
+        {
+            string content = MakeLogContent(sessions);
+            string kept = LogService.TrimContent(content, Keep);
+            int beforeAppend = LogService.CountSessions(kept);
+
+            // 裁剪后 + 即将追加的 1 段，总数不得超过 Keep
+            bool ok = beforeAppend <= Keep - 1;
+            Check($"{sessions} 次运行裁剪后剩 {beforeAppend} 段（加上新段共 {beforeAppend + 1} <= {Keep}）",
+                ok,
+                ok ? null : $"裁剪后 {beforeAppend} 段，加新段将变成 {beforeAppend + 1} 段，超出上限 {Keep}");
+        }
+
+        // 裁剪后追加新段，验证最终正好等于 Keep
+        string full = MakeLogContent(12);
+        string afterTrim = LogService.TrimContent(full, Keep);
+        string afterAppend = afterTrim + MakeLogSession(13);
+        Check($"裁剪后追加新段，最终恰好 {Keep} 段",
+            LogService.CountSessions(afterAppend) == Keep,
+            $"得到 {LogService.CountSessions(afterAppend)} 段");
+
+        Check("追加后保留的是最新几次（第 13 次在内）",
+            afterAppend.Contains("第 13 次运行的日志"));
+        Check("追加后已丢弃最早的（第 1 次）",
+            !afterAppend.Contains("第 1 次运行的日志"));
+    }
+
+    /// <summary>边界：未超上限时不得改动内容；开头不得残留空行</summary>
+    private static void TestLogTrimEdgeCases()
+    {
+        const int Keep = 5;
+
+        // 未超上限：原样返回
+        string under = MakeLogContent(3);
+        Check("3 段 < 上限，内容原样不动",
+            LogService.TrimContent(under, Keep) == under);
+
+        // 空内容
+        Check("空内容返回空", LogService.TrimContent("", Keep) == "");
+
+        // 恰好在上限边界：Keep-1 段时不动
+        string exact = MakeLogContent(Keep - 1);
+        Check($"{Keep - 1} 段时不裁剪",
+            LogService.TrimContent(exact, Keep) == exact);
+
+        // 多一段：应裁掉最旧一段
+        string over = MakeLogContent(Keep);
+        string trimmed = LogService.TrimContent(over, Keep);
+        Check($"{Keep} 段时裁掉最旧一段，剩 {Keep - 1} 段",
+            LogService.CountSessions(trimmed) == Keep - 1,
+            $"得到 {LogService.CountSessions(trimmed)} 段");
+
+        // 裁剪结果不得以空行/空白开头
+        Check("裁剪结果不以空行开头",
+            trimmed.Length > 0 && trimmed[0] != '\r' && trimmed[0] != '\n' && trimmed[0] != ' ',
+            "首字符 = " + (trimmed.Length > 0 ? ((int)trimmed[0]).ToString() : "空"));
+
+        Check("裁剪结果首行就是开始标记",
+            trimmed.StartsWith(LogBegin),
+            "首行 = " + trimmed.Split('\n')[0].Trim());
+
+        // 升级前的历史日志（无标记）不得被破坏
+        string legacy = "2000-01-01 00:00:03.400 - 旧日志\n2000-01-01 00:00:04.000 - 更多旧日志\n";
+        Check("无标记的历史日志原样保留",
+            LogService.TrimContent(legacy, Keep) == legacy);
+    }
+
+    /// <summary>
+    /// 计数契约：分隔头每次运行必须只出现一次。
+    ///
+    /// 曾把同一串标记同时用作首尾边框，导致每段被数两次、裁剪边界全错。
+    /// 这条测试守住"一段 = 一个标记"这个前提。
+    /// </summary>
+    private static void TestLogSessionCounting()
+    {
+        Check("空内容计 0 段", LogService.CountSessions("") == 0);
+
+        for (int n = 1; n <= 6; n++)
+        {
+            string c = MakeLogContent(n);
+            Check($"{n} 段内容计为 {n}", LogService.CountSessions(c) == n,
+                $"得到 {LogService.CountSessions(c)}");
+        }
+
+        // 一段里标记只出现一次（防止再次引入"首尾都用同一标记"的错误）
+        string one = MakeLogSession(1);
+        int markerCount = 0, idx = 0;
+        while ((idx = one.IndexOf(LogBegin, idx, StringComparison.Ordinal)) >= 0)
+        {
+            markerCount++;
+            idx += LogBegin.Length;
+        }
+        Check("单段内开始标记只出现 1 次（不得同时用作边框）",
+            markerCount == 1,
+            $"出现 {markerCount} 次——会把段数数成两倍");
+
+        // 把"计数锚点只能绑在开始标记上"这条约束钉进测试。
+        //
+        // 背景：曾设想用 LogService.Divider 替换计数锚点来验证测试的鉴别力，
+        // 实测发现——分隔线在每段里也恰好出现一次，段数照样数得对，
+        // 所以"锚点换成 Divider"本身并不构成 bug。这条断言因此改为
+        // 验证那件真正重要的事：计数**与分隔线无关**。
+        //
+        // 若哪天有人把计数锚点绑到分隔线上，一旦产品修改分隔线文案，
+        // 日志归档就会静默失效（段数恒为 0，永不再裁剪），
+        // 而所有既有测试仍会全绿。下面模拟的正是这种漂移。
+        string drifted = LogService.Divider.Replace('-', '=');
+        string oneDrifted = one.Replace(LogService.Divider, drifted);
+        Check("计数与分隔线无关：分隔线被改动，段数不变",
+            LogService.CountSessions(oneDrifted) == 1,
+            $"得到 {LogService.CountSessions(oneDrifted)} 段——计数被分隔线影响了");
+
+        // 同一条约束的反面：开始标记一旦被改动，计数必须立刻失真。
+        // 若这条也"通过"，说明计数锚点根本没绑在开始标记上。
+        string beginDrifted = one.Replace(LogBegin, "======== RUN 启动 ========");
+        Check("计数锚定开始标记：开始标记被改动，计数失真",
+            LogService.CountSessions(beginDrifted) == 0,
+            $"得到 {LogService.CountSessions(beginDrifted)} 段——计数锚点没绑在开始标记上");
+    }
+
+    // ---------------------------------------------------------------
+    // 运行序号必须持续递增（2026-10-04 端到端实跑才发现的问题）
+    //
+    // 【症状】跑满 KeepSessions 次之后，每一段的"运行序号"都显示成
+    // 同一个数字（实测 5 段全是"第 6 次启动"）。
+    //
+    // 【根因】序号曾经等于 CountSessions(文件) + 1。文件裁剪到上限后
+    // 段数恒为 KeepSessions，序号自然就卡死在同一个值。
+    //
+    // 【为什么单测没抓到】既有测试只验证了"裁剪后剩几段"，
+    // 从没验证过"写进日志里的那个序号"。段数对、序号错，
+    // 全绿却毫无察觉。下面这两组测试专门盯序号本身。
+    // ---------------------------------------------------------------
+
+    /// <summary>序号契约：模拟真实写入循环，序号必须严格递增且不重复</summary>
+    private static void TestLogNumberingMonotonic()
+    {
+        const int Keep = 5;
+        const int Runs = 20;
+
+        string content = "";
+        int prev = 0;
+        System.Collections.Generic.List<int> seen = new System.Collections.Generic.List<int>();
+        bool strictlyIncreasing = true;
+        string failureDetail = null;
+
+        for (int run = 1; run <= Runs; run++)
+        {
+            // 严格照 BeginSession 的顺序：先读序号，再裁剪，再写入
+            int number = LogService.NextSessionNumber(content);
+
+            if (number != prev + 1)
+            {
+                strictlyIncreasing = false;
+                if (failureDetail == null)
+                    failureDetail = $"第 {run} 次应得序号 {prev + 1}，实得 {number}";
+            }
+            prev = number;
+            seen.Add(number);
+
+            // 裁剪（与产品同样的调用顺序：算完序号才裁）
+            string trimmed = LogService.TrimContent(content, Keep);
+
+            // 追加本次段。基准写的就是本次序号本身。
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            sb.AppendLine();
+            sb.AppendLine(LogBegin);
+            sb.AppendLine($"启动时间: 2026-10-04 14:00:{run % 60:D2}.000");
+            sb.AppendLine($"运行序号: 第 {number} 次");
+            sb.AppendLine($"序号基准: {number}");
+            sb.AppendLine(LogService.Divider);
+            sb.AppendLine(LogEnd);
+            content = trimmed + sb.ToString();
+        }
+
+        Check($"连续 {Runs} 次运行，序号严格递增（{seen[0]}..{seen[seen.Count - 1]}）",
+            strictlyIncreasing, failureDetail);
+
+        Check($"连续 {Runs} 次运行，序号无重复",
+            new System.Collections.Generic.HashSet<int>(seen).Count == seen.Count,
+            $"出现重复：{string.Join(",", seen)}");
+
+        Check($"序号到达上限后仍在增长（末次 {seen[seen.Count - 1]} > 上限 {Keep}）",
+            seen[seen.Count - 1] > Keep,
+            $"末次序号 {seen[seen.Count - 1]}，说明裁剪后序号卡死了");
+
+        // 段数仍必须被压在 Keep 以内——修序号不能把保留策略弄坏
+        Check($"修复序号后段数仍不超过 {Keep}",
+            LogService.CountSessions(content) <= Keep,
+            $"得到 {LogService.CountSessions(content)} 段");
+    }
+
+    /// <summary>基准往返契约：写进去的基准必须能被读回来，否则序号会重置</summary>
+    private static void TestLogBaseRoundTrip()
+    {
+        // 首次运行：空文件、无基准 → 序号必须是 1
+        Check("首次运行（空文件）序号为 1",
+            LogService.NextSessionNumber("") == 1,
+            $"得到 {LogService.NextSessionNumber("")}");
+
+        // 无基准的旧版日志：退化为"段数 + 1"，保证升级后不会突然跳到天文数字
+        string legacy = MakeLogContent(3);
+        Check("无基准的旧日志退化为段数 + 1（得 4）",
+            LogService.NextSessionNumber(legacy) == 4,
+            $"得到 {LogService.NextSessionNumber(legacy)}");
+
+        // 基准行可读回：最后一条生效。
+        // 语义是"基准 = 上一次运行写下的序号"，所以本次 = 250 + 1 = 251。
+        // 注意结果与段数无关——这正是它能扛住裁剪的原因。
+        string withBase = "序号基准: 100\n" + MakeLogContent(2) + "序号基准: 250\n";
+        Check("基准取最后一条且与段数无关（得 250 + 1 = 251）",
+            LogService.NextSessionNumber(withBase) == 251,
+            $"得到 {LogService.NextSessionNumber(withBase)}");
+
+        // 同上内容的段数变了，序号必须不变——这是"抗裁剪"的核心证据
+        string withBaseMore = "序号基准: 100\n" + MakeLogContent(9) + "序号基准: 250\n";
+        Check("基准相同时，段数从 2 增到 9 也不影响序号",
+            LogService.NextSessionNumber(withBaseMore) == 251,
+            $"得到 {LogService.NextSessionNumber(withBaseMore)}");
+
+        // 基准行损坏时退化为"段数 + 1"，不得把序号重置成怪值
+        string broken = MakeLogContent(2) + "序号基准: 不是数字\n";
+        Check("基准行损坏时退化为段数 + 1（得 3）",
+            LogService.NextSessionNumber(broken) == 3,
+            $"得到 {LogService.NextSessionNumber(broken)}");
+    }
+
+    // ---------------------------------------------------------------
+
+    /// <summary>便捷重载：不需要附加说明时省略 detail</summary>
+    private static void Check(string name, bool ok)
+    {
+        Check(name, ok, null);
+    }
 
     private static void Check(string name, bool ok, string detail)
     {

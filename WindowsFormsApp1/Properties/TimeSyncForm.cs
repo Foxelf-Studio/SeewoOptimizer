@@ -160,7 +160,7 @@ namespace SeewoOpt
                 WriteLog($"构造函数异常：{ex}");
                 string errorMsg = $"初始化失败：{ex.Message}\n\n程序将关闭。";
                 MessageBox.Show(errorMsg, "致命错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                Program.Shutdown(1);
+                Program.Shutdown(1, $"主窗体初始化失败：{ex.Message}");
             }
         }
 
@@ -838,7 +838,7 @@ namespace SeewoOpt
                                 Process.Start(startInfo);
                             }
                             catch { }
-                            Program.Shutdown(0);
+                            Program.Shutdown(0, "以管理员权限重新启动");
                         }
 
                         UpdateButton(true);
@@ -1261,7 +1261,7 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
                 }
 
                 // 强制终止进程，避免任何残留
-                Program.Shutdown(0);
+                Program.Shutdown(0, "卸载完成，程序退出");
             }
             else
             {
