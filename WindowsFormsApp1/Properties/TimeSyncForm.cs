@@ -330,11 +330,16 @@ namespace SeewoOpt
         private void SetupForm()
         {
             this.Text = "川中计算机协会 - 陈叔叔系统优化工具";
-            // 【窗口高度减半】原 800x600，现减到一半高度。
-            // 上一个版本整屏都是日志，而用户真正想一眼看到的是"这个工具
-            // 已经在守着这台电脑多少天"。所以让上半屏留给那句守护天数，
+            // 【窗口尺寸】高 300（原 800x600 的下一半），宽 1200（原 800 的 1.5 倍）。
+            //
+            // 高度减半：上一个版本整屏都是日志，而用户真正想一眼看到的是
+            // "这个工具已经在守着这台电脑多少天"。上半屏留给守护天数，
             // 日志压到下半屏，窗口整体矮下来，不挡教室大屏上的课件。
-            this.Size = new Size(800, 300);
+            //
+            // 宽度 1.5 倍：800 宽配 300 高显得是一条细长横条，横向拥挤
+            // 而纵向空旷。加宽后日志区每行能放下更多字（少折行、少滚动），
+            // 底部六个按钮的间距也不再局促。
+            this.Size = new Size(1200, 300);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedSingle;
             this.MaximizeBox = false;
@@ -432,19 +437,22 @@ namespace SeewoOpt
 
             // ---------------------------------------------------------------
             // 底部按钮栏
+            //
+            // 【为什么按钮不用绝对坐标，而要在布局时按宽度均分】
+            // 原先六个按钮从 x=8 起按固定间距一路右排，在 800 宽窗口里
+            // 恰好铺满。窗口加宽到 1200 后，右侧会空出一大截——按钮全挤在
+            // 左边，看着左重右轻。改为按当前宽度均分，窗口怎么变都铺满。
             // ---------------------------------------------------------------
             int buttonWidth = 105;
             int buttonHeight = 32;
-            int buttonSpacing = 10;
 
             startButton = new Button
             {
                 Text = "开始执行",
-                Location = new Point(8, 5),
                 Size = new Size(buttonWidth, buttonHeight),
                 Font = new Font("Microsoft YaHei", 9),
                 // 【启动时不再自动执行】按钮默认可用，但不会自动触发——
-                // 由设置里的"程序启动时自动开始执行既定任务"决定是否代用户点一下。
+                // 由设置里的"程序启动时自动启动执行既定任务"决定是否代用户点一下。
                 Enabled = true
             };
             startButton.Click += (s, e) => StartSyncProcess();
@@ -457,12 +465,10 @@ namespace SeewoOpt
             };
             buttonBar.Controls.Add(startButton);
 
-            // 其余按钮沿用原有功能，只是位置改为按序排布
-            // （原先用绝对坐标写死在 y=510，窗口减半后必须跟着走）
+            // 其余按钮沿用原有功能，位置统一由 LayoutButtons() 按宽度均分
             retryButton = new Button
             {
                 Text = "重新同步",
-                Location = new Point(8 + (buttonWidth + buttonSpacing), 5),
                 Size = new Size(buttonWidth, buttonHeight),
                 Font = new Font("Microsoft YaHei", 9),
                 Enabled = false
@@ -473,7 +479,6 @@ namespace SeewoOpt
             showConsoleButton = new Button
             {
                 Text = "显示窗口",
-                Location = new Point(8 + (buttonWidth + buttonSpacing) * 2, 5),
                 Size = new Size(buttonWidth, buttonHeight),
                 Font = new Font("Microsoft YaHei", 9),
                 Visible = false
@@ -484,7 +489,6 @@ namespace SeewoOpt
             hideConsoleButton = new Button
             {
                 Text = "隐藏到托盘",
-                Location = new Point(8 + (buttonWidth + buttonSpacing) * 3, 5),
                 Size = new Size(buttonWidth, buttonHeight),
                 Font = new Font("Microsoft YaHei", 9)
             };
@@ -495,7 +499,6 @@ namespace SeewoOpt
             Button githubButton = new Button
             {
                 Text = "GitHub 仓库",
-                Location = new Point(8 + (buttonWidth + buttonSpacing) * 4, 5),
                 Size = new Size(buttonWidth, buttonHeight),
                 Font = new Font("Microsoft YaHei", 9)
             };
@@ -522,7 +525,6 @@ namespace SeewoOpt
             Button uninstallButton = new Button
             {
                 Text = "卸载程序",
-                Location = new Point(8 + (buttonWidth + buttonSpacing) * 5, 5),
                 Size = new Size(buttonWidth, buttonHeight),
                 Font = new Font("Microsoft YaHei", 9),
                 ForeColor = Color.Maroon,
@@ -530,6 +532,44 @@ namespace SeewoOpt
             };
             uninstallButton.Click += UninstallButton_Click;
             buttonBar.Controls.Add(uninstallButton);
+
+            // 按按钮栏实际宽度均分排布，窗口缩放时重算。
+            //
+            // 间距 = 剩余空间 / (按钮数 + 1)，两端各留一份，左右对称。
+            // 但间距设上限 MaxGap：1200 宽时若按均分算，六个按钮之间会拉开
+            // 约 80px，按钮像被撒开一样、彼此失去关联。超过上限就改为
+            // "固定间距 + 整组居中"，视觉上仍是一个紧凑的整体。
+            buttonBar.Resize += (s, e) =>
+            {
+                int count = 0;
+                foreach (Control c in buttonBar.Controls)
+                    if (c is Button) count++;
+                if (count == 0) return;
+
+                const int MaxGap = 22;
+                int totalBtnWidth = buttonWidth * count;
+                int room = buttonBar.ClientSize.Width - totalBtnWidth;
+
+                int gap = room / (count + 1);
+                if (gap > MaxGap) gap = MaxGap;
+                if (gap < 4) gap = 4;   // 窗口极窄时保底，避免重叠
+
+                // 以整组居中为基准起排
+                int groupWidth = totalBtnWidth + gap * (count - 1);
+                int x = (buttonBar.ClientSize.Width - groupWidth) / 2;
+                if (x < 2) x = 2;
+
+                int y = (buttonBar.ClientSize.Height - buttonHeight) / 2;
+                if (y < 0) y = 0;
+                foreach (Control c in buttonBar.Controls)
+                {
+                    if (c is Button)
+                    {
+                        c.Location = new Point(x, y);
+                        x += buttonWidth + gap;
+                    }
+                }
+            };
 
             // 加控件的顺序决定停靠布局：先加的在上。
             // 这里刻意"倒序"添加，让最终自上而下是 上半屏 → 日志 → 按钮栏。
