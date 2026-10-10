@@ -82,6 +82,8 @@
     <Compile Include="Services\ProcessCleaner.cs" />
     <Compile Include="Services\ReleaseInfoParser.cs" />
     <Compile Include="Services\SettingsStore.cs" />
+    <Compile Include="Services\ShutdownSchedule.cs" />
+    <Compile Include="Services\ShutdownService.cs" />
     <Compile Include="Services\SignatureVerifier.cs" />
     <Compile Include="Services\VolumeController.cs" />
     <Compile Include="Program.cs" />

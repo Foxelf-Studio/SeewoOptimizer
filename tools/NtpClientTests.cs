@@ -52,6 +52,29 @@ internal static class NtpClientTests
         TestLogNumberingMonotonic();
         TestLogBaseRoundTrip();
 
+        // --- 定时关机调度（2026-10-10 新增功能）---
+        TestShutdownDayMaskBitOrder();
+        TestShutdownPackedRoundTrip();
+        TestShutdownPackedSurvivesGarbage();
+        TestShutdownMatchesExactMinute();
+        TestShutdownEveryDayRule();
+        TestShutdownEmptyMaskNeverMatches();
+        TestShutdownNextOccurrence();
+        TestShutdownWarnWindow();
+        TestShutdownDecidePriority();
+        TestShutdownSerializationRoundTrip();
+        TestShutdownSerializationToleratesGarbage();
+
+        // --- 守护天数（"已守护 x 天"的计数契约）---
+        TestGuardedDaysFirstDayIsOne();
+        TestGuardedDaysCrossesMidnight();
+        TestGuardedDaysUnrecordedFallsBackToOne();
+        TestGuardedDaysNeverGoesBackwards();
+        TestGuardedDaysIgnoresTimeOfDay();
+
+        // --- 设置规整（注册表可手改，界面限不住）---
+        TestSettingsNormalizeClampsRuleCount();
+
         // --- 畸形输入 ---
         TestRejectsShortPacket();
         TestRejectsNullPacket();
@@ -721,6 +744,629 @@ internal static class NtpClientTests
         Check("基准行损坏时退化为段数 + 1（得 3）",
             LogService.NextSessionNumber(broken) == 3,
             $"得到 {LogService.NextSessionNumber(broken)}");
+    }
+
+    // ---------------------------------------------------------------
+    // 定时关机调度（2026-10-10 新增功能：到点提醒 + 关机）
+    //
+    // 【测什么】ShutdownScheduleLogic / ShutdownTimeRule 的纯逻辑部分：
+    // 星期掩码匹配、时分匹配、下一次触发时刻、提醒窗口、优先级。
+    // 全是纯函数，直接链接产品源码，不碰 UI、不读系统时钟。
+    //
+    // 【为什么必须测】关机是**破坏性动作**。逻辑错一格的后果是
+    // "该关的日子没关"或"不该关的时刻把电脑关了"——后者会直接切掉
+    // 教室一体机上正在讲的内容。这类错误不能靠人工等到那个点试出来。
+    //
+    // 【历史坑位，测试要钉住的】
+    //   · DayOfWeek 枚举是 Sunday=0，而位序约定是 Monday=0。
+    //     直接 (int)DayOfWeek 移位会整体错开一位 → 设周一却在周二执行。
+    //   · 掩码为 0 时规则永远不命中。这类"静默失效"最难排查。
+    //   · 提醒与关机若各算各的时刻，会慢慢错开 → 提醒了却不关，或关了没提醒。
+    // ---------------------------------------------------------------
+
+    private static ShutdownTimeRule MakeRule(int hour, int minute, params DayOfWeek[] days)
+    {
+        var rule = new ShutdownTimeRule { Hour = hour, Minute = minute };
+        foreach (DayOfWeek d in days) rule.SetDay(d, true);
+        return rule;
+    }
+
+    /// <summary>
+    /// 位序契约：位 0 必须对应周一、位 6 对应周日。
+    ///
+    /// 这条是最容易错、也最难发现的一条：DayOfWeek 枚举是 Sunday=0，
+    /// 若产品代码图省事直接 (int)day 移位，掩码整体错开一位，
+    /// 表现为"设了周一却在周二关机"。这种偏差每天只差一天，肉眼极难察觉。
+    /// </summary>
+    private static void TestShutdownDayMaskBitOrder()
+    {
+        Check("周一对应位 0",
+            ShutdownTimeRule.BitForDayOfWeek(DayOfWeek.Monday) == 0,
+            $"得到位 {ShutdownTimeRule.BitForDayOfWeek(DayOfWeek.Monday)}");
+
+        Check("周日对应位 6（不得受 DayOfWeek=0 影响）",
+            ShutdownTimeRule.BitForDayOfWeek(DayOfWeek.Sunday) == 6,
+            $"得到位 {ShutdownTimeRule.BitForDayOfWeek(DayOfWeek.Sunday)}");
+
+        // 七个位必须两两不同，且恰好覆盖 0..6
+        var bits = new System.Collections.Generic.HashSet<int>();
+        for (int i = 0; i < 7; i++)
+            bits.Add(ShutdownTimeRule.BitForDayOfWeek(ShutdownTimeRule.DayOfWeekForBit(i)));
+
+        Check("七个位互不重复且落在 0..6", bits.Count == 7,
+            $"得到 {bits.Count} 个不同的位");
+
+        // 逐天验证：只勾周一，则只有周一生效
+        var onlyMonday = MakeRule(10, 0, DayOfWeek.Monday);
+        Check("只勾周一：周一生效",
+            onlyMonday.IsDayEnabled(DayOfWeek.Monday));
+        Check("只勾周一：周二不生效",
+            !onlyMonday.IsDayEnabled(DayOfWeek.Tuesday));
+
+        // 逐天验证全部七天（防止只有首尾两天碰巧对）
+        bool allCorrect = true;
+        string detail = null;
+        foreach (DayOfWeek d in Enum.GetValues(typeof(DayOfWeek)))
+        {
+            var r = MakeRule(0, 0, d);
+            if (!r.IsDayEnabled(d))
+            {
+                allCorrect = false;
+                detail = $"{d} 单独设置后却判定为不生效";
+                break;
+            }
+            // 其余六天必须都不生效
+            foreach (DayOfWeek other in Enum.GetValues(typeof(DayOfWeek)))
+            {
+                if (other == d) continue;
+                if (r.IsDayEnabled(other))
+                {
+                    allCorrect = false;
+                    detail = $"只设 {d}，却 {other} 也生效";
+                    break;
+                }
+            }
+            if (!allCorrect) break;
+        }
+        Check("逐天验证：任意单天设置只对该天生效", allCorrect, detail);
+    }
+
+    /// <summary>打包往返：ToPacked → FromPacked 必须完全还原</summary>
+    private static void TestShutdownPackedRoundTrip()
+    {
+        bool allOk = true;
+        string detail = null;
+
+        // 覆盖边界：0:00 / 23:59、掩码 0 / 全选 / 单日
+        int[][] cases = new int[][]
+        {
+            new int[] { 0, 0, 0 },
+            new int[] { 23, 59, ShutdownTimeRule.EveryDayMask },
+            new int[] { 12, 30, 1 },          // 只有周一
+            new int[] { 7, 5, 127 },          // 每天
+            new int[] { 18, 0, 0b0101010 },
+            new int[] { 6, 45, 64 },          // 只有周日（位 6）
+        };
+
+        foreach (int[] c in cases)
+        {
+            var rule = new ShutdownTimeRule { Hour = c[0], Minute = c[1], DayMask = c[2] };
+            ShutdownTimeRule back = ShutdownTimeRule.FromPacked(rule.ToPacked());
+
+            if (back.Hour != c[0] || back.Minute != c[1] || back.DayMask != c[2])
+            {
+                allOk = false;
+                detail = $"原 {c[0]}:{c[1]} mask={c[2]} → 还原为 "
+                       + $"{back.Hour}:{back.Minute} mask={back.DayMask}";
+                break;
+            }
+        }
+        Check("打包往返：时间与掩码完全还原", allOk, detail);
+
+        // 全枚举校验编码是单射的（不同规则不得编码成同一个值）。
+        // 【为什么必须查这一条】编码用 "分钟数 * 128 + 掩码"，
+        // 若乘数写成了 127，掩码 127 就会与下一档的掩码 0 撞上，
+        // 表现为"某两条规则互相覆盖"，而单一的往返测试抓不到。
+        var seen = new System.Collections.Generic.Dictionary<int, string>();
+        string collision = null;
+        for (int h = 0; h < 24 && collision == null; h++)
+        {
+            for (int m = 0; m < 60 && collision == null; m++)
+            {
+                for (int mask = 0; mask <= ShutdownTimeRule.EveryDayMask; mask++)
+                {
+                    var r = new ShutdownTimeRule { Hour = h, Minute = m, DayMask = mask };
+                    int packed = r.ToPacked();
+                    string key = $"{h}:{m}/{mask}";
+
+                    if (seen.ContainsKey(packed))
+                    {
+                        collision = $"{seen[packed]} 与 {key} 都编码为 {packed}";
+                        break;
+                    }
+                    seen[packed] = key;
+                }
+            }
+        }
+        Check("编码是单射的：任意两条不同规则不得编成同一个值（乘数必须是 128）",
+            collision == null, collision);
+    }
+
+    /// <summary>损坏的注册表值不得产生非法时刻，也不得抛异常</summary>
+    private static void TestShutdownPackedSurvivesGarbage()
+    {
+        int[] garbage = { -1, -999999, 0, int.MaxValue, int.MinValue, 999999 };
+        bool allOk = true;
+        string detail = null;
+
+        foreach (int g in garbage)
+        {
+            try
+            {
+                ShutdownTimeRule r = ShutdownTimeRule.FromPacked(g);
+
+                if (r.Hour < 0 || r.Hour > 23 || r.Minute < 0 || r.Minute > 59)
+                {
+                    allOk = false;
+                    detail = $"输入 {g} 得到非法时刻 {r.Hour}:{r.Minute}";
+                    break;
+                }
+                if ((r.DayMask & ~ShutdownTimeRule.EveryDayMask) != 0)
+                {
+                    allOk = false;
+                    detail = $"输入 {g} 得到越界掩码 {r.DayMask}";
+                    break;
+                }
+            }
+            catch (Exception ex)
+            {
+                allOk = false;
+                detail = $"输入 {g} 抛出了 {ex.GetType().Name}";
+                break;
+            }
+        }
+        Check("损坏的编码不产生非法时刻、不抛异常", allOk, detail);
+    }
+
+    /// <summary>
+    /// 时分匹配：必须**精确到分钟**，同一分钟内任何秒数都算命中，
+    /// 差一分钟都不算。
+    /// </summary>
+    private static void TestShutdownMatchesExactMinute()
+    {
+        var rule = MakeRule(23, 30, DayOfWeek.Monday);
+        DateTime monday = new DateTime(2026, 10, 12, 23, 30, 0);   // 2026-10-12 是周一
+
+        Check("前提：2026-10-12 是周一",
+            monday.DayOfWeek == DayOfWeek.Monday, $"实际 {monday.DayOfWeek}");
+
+        Check("23:30:00 命中", rule.Matches(monday));
+        Check("23:30:59 同样命中（按分钟粒度）",
+            rule.Matches(monday.AddSeconds(59)));
+        Check("23:29:59 不命中（早一分钟）",
+            !rule.Matches(monday.AddSeconds(-1)));
+        Check("23:31:00 不命中（晚一分钟）",
+            !rule.Matches(monday.AddMinutes(1)));
+        Check("同一天 22:30 不命中（小时不同）",
+            !rule.Matches(new DateTime(2026, 10, 12, 22, 30, 0)));
+
+        // 跨周：周二同一时刻不命中
+        Check("周二同一时刻不命中（星期不匹配）",
+            !rule.Matches(new DateTime(2026, 10, 13, 23, 30, 0)));
+    }
+
+    /// <summary>"每天"应当等价于七天全选，且必须是真的七天</summary>
+    private static void TestShutdownEveryDayRule()
+    {
+        var rule = new ShutdownTimeRule { Hour = 8, Minute = 0, DayMask = ShutdownTimeRule.EveryDayMask };
+
+        Check("每天模式：IsEveryDay 为真", rule.IsEveryDay);
+
+        bool allSeven = true;
+        string detail = null;
+        foreach (DayOfWeek d in Enum.GetValues(typeof(DayOfWeek)))
+        {
+            if (!rule.IsDayEnabled(d))
+            {
+                allSeven = false;
+                detail = $"{d} 未被覆盖";
+                break;
+            }
+        }
+        Check("每天模式：七天全部命中", allSeven, detail);
+
+        // 逐日跑到一周，验证每天都能命中（用连续 7 天模拟）
+        DateTime start = new DateTime(2026, 10, 12, 8, 0, 0);
+        bool everyDayHit = true;
+        for (int i = 0; i < 14; i++)
+        {
+            if (!rule.Matches(start.AddDays(i)))
+            {
+                everyDayHit = false;
+                detail = $"{start.AddDays(i):yyyy-MM-dd}（{start.AddDays(i).DayOfWeek}）未命中";
+                break;
+            }
+        }
+        Check("每天模式：连续 14 天全部命中", everyDayHit, detail);
+    }
+
+    /// <summary>
+    /// 空掩码：规则永远不命中，且 NextOccurrence 返回 null。
+    ///
+    /// 【为什么单独测】这是最典型的"静默失效"——用户设了时间点，
+    /// 程序不报错、不提示，就是永远不关机。必须能自动发现。
+    /// </summary>
+    private static void TestShutdownEmptyMaskNeverMatches()
+    {
+        var empty = new ShutdownTimeRule { Hour = 12, Minute = 0, DayMask = 0 };
+
+        bool never = true;
+        string detail = null;
+        DateTime start = new DateTime(2026, 10, 12, 12, 0, 0);
+        for (int i = 0; i < 21; i++)
+        {
+            if (empty.Matches(start.AddDays(i)))
+            {
+                never = false;
+                detail = $"{start.AddDays(i):yyyy-MM-dd} 竟然命中";
+                break;
+            }
+        }
+        Check("空掩码规则：三周内一次都不命中", never, detail);
+
+        Check("空掩码规则：NextOccurrence 返回 null（不得死循环找下去）",
+            !ShutdownScheduleLogic.NextOccurrence(empty, start).HasValue);
+
+        Check("空掩码规则：IsEveryDay 为假", !empty.IsEveryDay);
+    }
+
+    /// <summary>
+    /// 下一次触发：必须是 from **之后**的第一个命中时刻，
+    /// 且要能正确跨天、跨周。
+    /// </summary>
+    private static void TestShutdownNextOccurrence()
+    {
+        var daily = MakeRule(23, 0, DayOfWeek.Monday, DayOfWeek.Tuesday,
+                                        DayOfWeek.Wednesday, DayOfWeek.Thursday,
+                                        DayOfWeek.Friday, DayOfWeek.Saturday, DayOfWeek.Sunday);
+
+        DateTime noon = new DateTime(2026, 10, 12, 12, 0, 0);
+        DateTime? next = ShutdownScheduleLogic.NextOccurrence(daily, noon);
+        Check("每天 23:00：从中午算出当天 23:00",
+            next.HasValue && next.Value == new DateTime(2026, 10, 12, 23, 0, 0),
+            next.HasValue ? $"得到 {next.Value:yyyy-MM-dd HH:mm:ss}" : "返回 null");
+
+        // 已过今天的点 → 应算到明天
+        DateTime late = new DateTime(2026, 10, 12, 23, 30, 0);
+        DateTime? next2 = ShutdownScheduleLogic.NextOccurrence(daily, late);
+        Check("每天 23:00：从 23:30 算出次日 23:00",
+            next2.HasValue && next2.Value == new DateTime(2026, 10, 13, 23, 0, 0),
+            next2.HasValue ? $"得到 {next2.Value:yyyy-MM-dd HH:mm:ss}" : "返回 null");
+
+        // 【关键边界】正好落在目标分钟上时，必须返回**下一次**而不是自身。
+        // 若返回自身，调用方会据此排出"此刻提醒、5 分钟后关机"，
+        // 但那条规则其实刚刚已经触发过 —— 会重复关机。
+        DateTime exactly = new DateTime(2026, 10, 12, 23, 0, 0);
+        DateTime? next3 = ShutdownScheduleLogic.NextOccurrence(daily, exactly);
+        Check("正好在目标分钟上：返回的是明天同一时刻，不是自身",
+            next3.HasValue && next3.Value == new DateTime(2026, 10, 13, 23, 0, 0),
+            next3.HasValue ? $"得到 {next3.Value:yyyy-MM-dd HH:mm:ss}" : "返回 null");
+
+        // 跨周：只设周一，从周二算起应落到下周一（跨 6 天）
+        var onlyMonday = MakeRule(9, 0, DayOfWeek.Monday);
+        DateTime tue = new DateTime(2026, 10, 13, 10, 0, 0);
+        DateTime? next4 = ShutdownScheduleLogic.NextOccurrence(onlyMonday, tue);
+        Check("只设周一：从周二算出下周一 09:00（跨周）",
+            next4.HasValue && next4.Value == new DateTime(2026, 10, 19, 9, 0, 0),
+            next4.HasValue ? $"得到 {next4.Value:yyyy-MM-dd}（{next4.Value.DayOfWeek}）" : "返回 null");
+    }
+
+    /// <summary>
+    /// 提醒窗口：关机前 5 分钟那一刻必须命中提醒，其余时刻不命中。
+    /// </summary>
+    private static void TestShutdownWarnWindow()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 0, DayOfWeek.Monday)
+        };
+
+        DateTime shutdownAt = new DateTime(2026, 10, 12, 23, 0, 0);
+
+        // 提前量必须是 5 分钟（写在产品常量里，测试引用它而不是抄字面量）
+        Check($"提前量常量为 5 分钟（实际 {ShutdownScheduleLogic.WarnMinutesAhead}）",
+            ShutdownScheduleLogic.WarnMinutesAhead == 5);
+
+        DateTime warnAt = shutdownAt.AddMinutes(-ShutdownScheduleLogic.WarnMinutesAhead);
+
+        Check("关机前 5 分钟：命中提醒",
+            ShutdownScheduleLogic.FindRuleToWarn(rules, warnAt) != null,
+            $"检查时刻 {warnAt:HH:mm}");
+
+        Check("关机前 5 分钟那一整分钟内都命中（含第 59 秒）",
+            ShutdownScheduleLogic.FindRuleToWarn(rules, warnAt.AddSeconds(59)) != null);
+
+        Check("关机前 6 分钟：不提醒",
+            ShutdownScheduleLogic.FindRuleToWarn(rules, warnAt.AddMinutes(-1)) == null);
+
+        Check("关机前 4 分钟：不提醒",
+            ShutdownScheduleLogic.FindRuleToWarn(rules, warnAt.AddMinutes(1)) == null);
+
+        Check("关机时刻本身：不触发提醒（该走关机分支）",
+            ShutdownScheduleLogic.FindRuleToWarn(rules, shutdownAt) == null);
+    }
+
+    /// <summary>
+    /// 优先级契约：关机与提醒落在同一分钟时，必须选择**关机**。
+    ///
+    /// 【为什么重要】反过来的话，程序会在该关机的时刻弹出一个提醒框
+    /// 把关机顶掉——而那个框还写着"5 分钟后关机"，语义完全错乱。
+    /// </summary>
+    private static void TestShutdownDecidePriority()
+    {
+        ShutdownTimeRule hit;
+
+        // 构造：规则 A 在 23:00 关机，规则 B 在 23:05 关机。
+        // 那么 23:00 这一刻既是 A 的关机点，又是 B 的提醒点。
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 0, DayOfWeek.Monday),
+            MakeRule(23, 5, DayOfWeek.Monday)
+        };
+
+        DateTime conflict = new DateTime(2026, 10, 12, 23, 0, 0);
+
+        // 先确认这确实是个冲突时刻（B 的提醒点 = 23:05 - 5 = 23:00）
+        Check("前提：23:00 同时是规则 B 的提醒点",
+            ShutdownScheduleLogic.FindRuleToWarn(rules, conflict) != null);
+
+        ShutdownScheduleLogic.ActionKind kind =
+            ShutdownScheduleLogic.Decide(rules, conflict, out hit);
+
+        Check("冲突时刻选择「关机」而非「提醒」",
+            kind == ShutdownScheduleLogic.ActionKind.Shutdown,
+            $"得到 {kind}");
+
+        Check("冲突时刻命中的是 23:00 那条规则",
+            hit != null && hit.Hour == 23 && hit.Minute == 0,
+            hit == null ? "未命中任何规则" : $"命中 {hit.Describe()}");
+
+        // 平常时刻什么也不做
+        DateTime idle = new DateTime(2026, 10, 12, 15, 0, 0);
+        ShutdownScheduleLogic.ActionKind idleKind =
+            ShutdownScheduleLogic.Decide(rules, idle, out hit);
+        Check("无关时刻返回 None", idleKind == ShutdownScheduleLogic.ActionKind.None,
+            $"得到 {idleKind}");
+    }
+
+    /// <summary>
+    /// 序列化往返：规则写进注册表再读回来必须完全一致。
+    /// 这条把界面 → 注册表 → 下次启动这条完整链路的中间段固定住。
+    /// </summary>
+    private static void TestShutdownSerializationRoundTrip()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(7, 30, DayOfWeek.Monday, DayOfWeek.Friday),
+            new ShutdownTimeRule { Hour = 22, Minute = 0, DayMask = ShutdownTimeRule.EveryDayMask },
+            MakeRule(12, 15, DayOfWeek.Sunday)
+        };
+
+        string serialized = SettingsStore.SerializeRules(rules);
+        var back = SettingsStore.DeserializeRules(serialized);
+
+        Check($"序列化后条数不变（{rules.Count} 条）",
+            back.Count == rules.Count, $"得到 {back.Count} 条");
+
+        bool identical = back.Count == rules.Count;
+        string detail = null;
+        for (int i = 0; identical && i < rules.Count; i++)
+        {
+            if (back[i].Hour != rules[i].Hour
+                || back[i].Minute != rules[i].Minute
+                || back[i].DayMask != rules[i].DayMask)
+            {
+                identical = false;
+                detail = $"第 {i + 1} 条：原 {rules[i].Describe()} → "
+                       + $"还原为 {back[i].Describe()}";
+            }
+        }
+        Check("序列化往返：每条规则的时间与星期完全一致", identical, detail);
+
+        // 空列表往返
+        Check("空列表序列化为空串",
+            SettingsStore.SerializeRules(new System.Collections.Generic.List<ShutdownTimeRule>()) == "");
+        Check("空串反序列化为空列表",
+            SettingsStore.DeserializeRules("").Count == 0);
+        Check("null 反序列化为空列表",
+            SettingsStore.DeserializeRules(null).Count == 0);
+    }
+
+    /// <summary>
+    /// 序列化容错：一条损坏不得连累其余规则。
+    ///
+    /// 【为什么逐条隔离而不是整体回退】规则是用户手配的。
+    /// 一条写坏就让全部关机设置消失，代价太大——用户会以为程序坏了。
+    /// </summary>
+    private static void TestShutdownSerializationToleratesGarbage()
+    {
+        // 中间夹一条非数字
+        var good = new ShutdownTimeRule { Hour = 23, Minute = 0, DayMask = ShutdownTimeRule.EveryDayMask };
+        string mixed = good.ToPacked() + ";这不是数字;" + good.ToPacked();
+
+        var parsed = SettingsStore.DeserializeRules(mixed);
+        Check("损坏项被跳过，其余规则仍保留（2 条）",
+            parsed.Count == 2, $"得到 {parsed.Count} 条");
+
+        // 全损坏
+        var allBad = SettingsStore.DeserializeRules("abc;def;;ghi");
+        Check("全部损坏时返回空列表且不抛异常", allBad.Count == 0,
+            $"得到 {allBad.Count} 条");
+
+        // 空项（末尾多余分隔符）不得产生幽灵规则
+        var trailing = SettingsStore.DeserializeRules(good.ToPacked() + ";;");
+        Check("末尾多余分隔符不产生多余规则",
+            trailing.Count == 1, $"得到 {trailing.Count} 条");
+
+        // 超量输入必须被截到上限
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < 20; i++)
+        {
+            if (sb.Length > 0) sb.Append(';');
+            sb.Append(new ShutdownTimeRule { Hour = i % 24, Minute = i, DayMask = 127 }.ToPacked());
+        }
+        var clamped = SettingsStore.DeserializeRules(sb.ToString());
+        Check($"超过上限时截断到 {SeewoOpt.Services.AppSettings.MaxShutdownRules} 条",
+            clamped.Count == SeewoOpt.Services.AppSettings.MaxShutdownRules,
+            $"得到 {clamped.Count} 条");
+    }
+
+    // ---------------------------------------------------------------
+    // 守护天数
+    //
+    // 【为什么这一组必须存在】
+    // GuardedDays 是界面上唯一一处"用户能一眼看出对错"的数字。
+    // 它没有外部依赖、没有异常路径，极易被当成"这么简单不用测"——
+    // 而它恰恰错得最隐蔽：写成 (today - FirstRunDate).TotalDays 时，
+    // 同一天的多数时刻仍会算出看起来合理的值，只有跨午夜的那一小段
+    // 才暴露为 0 天。测试必须钉住"跨午夜"和"时刻无关"这两条。
+    // ---------------------------------------------------------------
+
+    /// <summary>首次运行当天：第 1 天，而不是第 0 天。</summary>
+    private static void TestGuardedDaysFirstDayIsOne()
+    {
+        var s = new SeewoOpt.Services.AppSettings
+        {
+            FirstRunDate = new DateTime(2026, 10, 10, 9, 30, 0)
+        };
+
+        int days = s.GuardedDays(new DateTime(2026, 10, 10, 9, 31, 0));
+        Check("首次运行当天为第 1 天", days == 1, $"得到 {days}");
+    }
+
+    /// <summary>
+    /// 跨午夜即算新的一天——这条专门抓"按时刻相减"的错误写法。
+    /// 昨天 23:00 首次运行、今天 08:00 打开，必须是第 2 天。
+    /// </summary>
+    private static void TestGuardedDaysCrossesMidnight()
+    {
+        var s = new SeewoOpt.Services.AppSettings
+        {
+            FirstRunDate = new DateTime(2026, 10, 10, 23, 0, 0)
+        };
+
+        int days = s.GuardedDays(new DateTime(2026, 10, 11, 8, 0, 0));
+        Check("昨天 23:00 → 今天 08:00 为第 2 天（跨午夜）",
+            days == 2, $"得到 {days}｜按时刻相减会算成 {(new DateTime(2026,10,11,8,0,0) - s.FirstRunDate).TotalDays.ToString("0.####")}");
+
+        // 反向确认：同一天内不论怎么过，都是第 1 天
+        int sameDayLate = s.GuardedDays(new DateTime(2026, 10, 10, 23, 59, 59));
+        Check("同一天 23:00 → 23:59 仍为第 1 天", sameDayLate == 1, $"得到 {sameDayLate}");
+    }
+
+    /// <summary>未记录首次运行日期时（旧版本升级上来）回退为第 1 天。</summary>
+    private static void TestGuardedDaysUnrecordedFallsBackToOne()
+    {
+        var s = new SeewoOpt.Services.AppSettings { FirstRunDate = DateTime.MinValue };
+        int days = s.GuardedDays(new DateTime(2026, 10, 10, 12, 0, 0));
+        Check("未记录起始日时回退为第 1 天", days == 1, $"得到 {days}");
+    }
+
+    /// <summary>
+    /// 天数永不倒退。若注册表里的日期被手工改成未来，
+    /// 直接相减会得到负数——界面上就成了"已守护 -5 天"。
+    /// </summary>
+    private static void TestGuardedDaysNeverGoesBackwards()
+    {
+        var s = new SeewoOpt.Services.AppSettings
+        {
+            FirstRunDate = new DateTime(2030, 1, 1, 0, 0, 0)   // 未来
+        };
+
+        int days = s.GuardedDays(new DateTime(2026, 10, 10, 12, 0, 0));
+        Check("起始日在未来时不出现 0 天或负天数", days >= 1, $"得到 {days}");
+    }
+
+    /// <summary>
+    /// 天数只与"日期"有关，与当天几点无关。
+    /// 把起始日固定在 10 月 10 日，则 10 月 15 日不论何时打开都应是第 6 天。
+    /// </summary>
+    private static void TestGuardedDaysIgnoresTimeOfDay()
+    {
+        var s = new SeewoOpt.Services.AppSettings
+        {
+            FirstRunDate = new DateTime(2026, 10, 10, 6, 0, 0)
+        };
+
+        var probes = new[]
+        {
+            new DateTime(2026, 10, 15, 0, 0, 0),
+            new DateTime(2026, 10, 15, 5, 59, 0),
+            new DateTime(2026, 10, 15, 6, 0, 0),
+            new DateTime(2026, 10, 15, 23, 59, 59),
+        };
+
+        bool allSix = true;
+        string detail = null;
+        foreach (var p in probes)
+        {
+            int d = s.GuardedDays(p);
+            if (d != 6)
+            {
+                allSix = false;
+                detail = $"{p:yyyy-MM-dd HH:mm:ss} 得到 {d} 天，应为 6";
+                break;
+            }
+        }
+        Check("10/10 起算，10/15 全天各时刻均为第 6 天", allSix, detail);
+    }
+
+    /// <summary>
+    /// 设置规整必须把超量关机规则截到上限。
+    /// 注册表可以手工写入 20 条，界面拦不住——上限得在模型层收紧。
+    /// </summary>
+    private static void TestSettingsNormalizeClampsRuleCount()
+    {
+        var s = SeewoOpt.Services.AppSettings.CreateDefault();
+        for (int i = 0; i < 20; i++)
+        {
+            s.ShutdownRules.Add(new SeewoTimeRuleProbe(i).Rule);
+        }
+
+        s.Normalize();
+
+        Check($"Normalize 把规则数收紧到 {SeewoOpt.Services.AppSettings.MaxShutdownRules} 条",
+            s.ShutdownRules.Count == SeewoOpt.Services.AppSettings.MaxShutdownRules,
+            $"得到 {s.ShutdownRules.Count} 条");
+
+        // null 列表也不得让 Normalize 抛异常
+        var n = SeewoOpt.Services.AppSettings.CreateDefault();
+        n.ShutdownRules = null;
+        n.Normalize();
+        Check("Normalize 把 null 规则列表补成空列表",
+            n.ShutdownRules != null && n.ShutdownRules.Count == 0);
+
+        // 音量边界
+        var v = SeewoOpt.Services.AppSettings.CreateDefault();
+        v.VolumeLevel = 250; v.Normalize();
+        Check("Normalize 把音量上限收到 100", v.VolumeLevel == 100, $"得到 {v.VolumeLevel}");
+        v.VolumeLevel = -30; v.Normalize();
+        Check("Normalize 把音量下限收到 0", v.VolumeLevel == 0, $"得到 {v.VolumeLevel}");
+    }
+
+    /// <summary>构造规整用规则的辅助——只为凑数量，语义无关。</summary>
+    private sealed class SeewoTimeRuleProbe
+    {
+        public ShutdownTimeRule Rule { get; }
+        public SeewoTimeRuleProbe(int seed)
+        {
+            Rule = new ShutdownTimeRule
+            {
+                Hour = seed % 24,
+                Minute = seed % 60,
+                DayMask = ShutdownTimeRule.EveryDayMask
+            };
+        }
     }
 
     // ---------------------------------------------------------------

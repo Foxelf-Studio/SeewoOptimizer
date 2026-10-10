@@ -24,5 +24,14 @@
     -->
     <Compile Include="..\WindowsFormsApp1\Services\NtpClient.cs" />
     <Compile Include="..\WindowsFormsApp1\Services\LogService.cs" />
+    <!--
+      关机调度的纯逻辑与设置序列化。这两个文件是本次新增功能的核心判定部分，
+      不含任何 UI 依赖（ShutdownSchedule.cs 只用 System，
+      SettingsStore.cs 只用 Microsoft.Win32 + System），因此可以直接编进测试。
+      注意 SettingsStore.cs 里读写的注册表路径仍是产品路径——
+      测试只调用它的 Serialize/Deserialize 这两个纯函数，不碰注册表。
+    -->
+    <Compile Include="..\WindowsFormsApp1\Services\ShutdownSchedule.cs" />
+    <Compile Include="..\WindowsFormsApp1\Services\SettingsStore.cs" />
   </ItemGroup>
 </Project>
