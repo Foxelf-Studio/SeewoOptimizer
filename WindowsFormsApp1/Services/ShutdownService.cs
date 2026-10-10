@@ -43,13 +43,24 @@ namespace SeewoOpt.Services
         public const int PollIntervalMs = 20000;
 
         /// <summary>
-        /// 已提醒过的关机时刻，防止同一分钟反复弹窗。
+        /// 已经为"哪一次关机"弹过提醒了。防止同一轮关机重复弹窗。
         ///
-        /// 轮询间隔 20 秒，而判断是按分钟粒度——若不去重，
-        /// 在提醒那一分钟内 20 秒、40 秒、60 秒会各弹一次，共三次。
-        /// 记录"已经提醒过的那个绝对分钟"即可。
+        /// 【为什么记的是"关机时刻"而不是"提醒的那一分钟"——这是个真实缺陷】
+        /// 早先这里记的是"已提醒过的那个绝对分钟"（_lastWarnedMinute），
+        /// 判据是 `_lastWarnedMinute != 当前分钟`。它只能挡住**同一分钟内**
+        /// 20 秒 / 40 秒 / 60 秒的重复弹窗，挡不住跨分钟。
+        ///
+        /// 而 FindRuleToWarn 的窗口是一整段 [触发时刻-提前量, 触发时刻)：
+        /// 23:40 关机 → 提醒窗口是 23:35~23:39，整整五分钟。
+        /// 用户在 23:35 看到框后**没点任何按钮**（框就这么挂着），
+        /// 23:36 定时器再 tick：当前分钟 23:36 ≠ 已记录 23:35 → 条件成立 → 又弹一个。
+        /// 于是 23:36、23:37、23:38、23:39 各弹一个，实机表现为"每分钟弹一次窗"。
+        ///
+        /// 正确的判据不是"这一分钟提醒过没有"，而是"**这一次关机**提醒过没有"。
+        /// 一轮关机（同一个 DueAt）只应弹一次，无论横跨多少个自然分钟。
+        /// 重启后内存态归零，自然会重新弹——那正是需要的行为。
         /// </summary>
-        private static DateTime _lastWarnedMinute = DateTime.MinValue;
+        private static DateTime _warnedForDue = DateTime.MinValue;
 
         /// <summary>已执行过关机的时刻，防止重复下发 shutdown 命令</summary>
         private static DateTime _lastShutdownMinute = DateTime.MinValue;
@@ -92,14 +103,20 @@ namespace SeewoOpt.Services
         }
 
         /// <summary>
-        /// 执行一次巡检。纯判断，不产生任何副作用（不改状态、不碰系统）。
+        /// 执行一次巡检。读取全部内存记账状态，判断本轮该做什么。
         ///
-        /// 【为什么要分成"判断"与"记账"两步】
-        /// 调用方在收到 ShouldWarn 后要弹一个模态框，用户可能看很久。
-        /// 若在判断时就更新 _lastWarnedMinute，那么弹窗期间的下一次巡检
-        /// 会因为"已提醒过"而跳过——看似合理；但如果弹窗被用户直接关掉，
-        /// 状态已经消耗掉了，这一分钟的提醒就永远丢了。
-        /// 因此这里只读不写，由调用方在**确认处理完之后**调 Mark* 记账。
+        /// 【关于副作用——这一条与早先的设计不同，务必看清】
+        /// 早先这里只读不写，因为"弹框要等用户点击，可能等很久"，
+        /// 怕把状态消耗掉导致提醒丢失。那个担心在**用户会点**的前提下成立。
+        ///
+        /// 但实机暴露了反面：教室一体机上用户根本不点，模态框就一直挂着，
+        /// UI 线程被阻塞——这时"等弹框返回再记账"根本不会发生。
+        /// 结果是提醒窗口的每一分钟都重新弹一个框（实机表现为 23:40/41/42 三个框）。
+        ///
+        /// 因此现在在**产出 ShouldWarn 的同时**就把两笔账记好：
+        ///   · _warnedForDue —— 这一轮关机已提醒，窗口内不再重复
+        ///   · _promisedAt   —— 承诺时刻已定，到点据此执行
+        /// 记在产出点而不是调用点，是"用户不点也不会重弹"的唯一保证。
         /// </summary>
         public static PollResult Poll(IEnumerable<ShutdownTimeRule> rules, DateTime now)
         {
@@ -134,33 +151,53 @@ namespace SeewoOpt.Services
             //
             // 两种情况会走到这里：
             //   a) 正常路径：规则 23:00，22:55 命中提醒窗口 → 承诺 23:00
-            //   b) 重启补弹：22:56 重启后 _lastWarnedMinute 归零，
+            //   b) 重启补弹：22:56 重启后 _warnedForDue 归零，
             //      此刻仍在 22:55~22:59 的提醒窗口内 → 重新弹，
             //      并把承诺时刻顺延为"现在 + 5 分钟"
             //
             // 注意 b) 的判据：只要"某条规则的下一次触发时刻"距现在 ≤ 提前量，
             // 就算还在窗口内。这样 22:56 重启也能补弹，而不局限于 22:55 整。
-            if (_lastWarnedMinute != thisMinute)
+            //
+            // 【去重判据：以"这一次关机"为单位，不是以"这一分钟"为单位】
+            // 见 _warnedForDue 的注释——按分钟去重会让用户在提醒窗口内
+            // （最长 5 分钟）看到 5 个弹窗。
+            ShutdownTimeRule warnRule = ShutdownScheduleLogic.FindRuleToWarn(rules, now);
+            if (warnRule != null)
             {
-                ShutdownTimeRule warnRule = ShutdownScheduleLogic.FindRuleToWarn(rules, now);
-                if (warnRule != null)
+                DateTime? next = ShutdownScheduleLogic.NextOccurrence(
+                    warnRule, thisMinute.AddMinutes(-1));
+
+                // 【两道条件各司其职，不要合并】
+                //   _warnedForDue != next.Value  —— 这一轮关机已提醒过（窗口内去重的**主防线**）
+                //   _skipUntil    != next.Value  —— 用户已选"本次不关机"，别再问
+                //
+                // 曾经这里还有第三道 `_promisedAt != next.Value`，已删除：
+                // 它的本意是"已承诺过就别再弹"，但承诺时刻在**顺延路径**上
+                // （22:56 补弹 → 承诺 23:01）并不等于 next（23:00），
+                // 于是它在最需要它挡的重启场景里恰好失效——真正挡住重复弹窗的
+                // 始终是 _warnedForDue。留着它只会让人误以为它在起作用，
+                // 而删掉它测试纹丝不动，正是"冗余防线掩盖真防线"的典型。
+                if (next.HasValue && _warnedForDue != next.Value
+                    && _skipUntil != next.Value)
                 {
-                    DateTime? next = ShutdownScheduleLogic.NextOccurrence(
-                        warnRule, thisMinute.AddMinutes(-1));
+                    // 承诺时刻 = 从现在起算满提前量。
+                    // 正常情况（22:55 弹）它恰好等于 next（23:00）；
+                    // 重启补弹（22:56 弹）则顺延到 23:01。
+                    DateTime promised = thisMinute
+                        .AddMinutes(ShutdownScheduleLogic.WarnMinutesAhead);
+                    if (promised < next.Value) promised = next.Value;
 
-                    if (next.HasValue && _skipUntil != next.Value)
-                    {
-                        // 承诺时刻 = 从现在起算满提前量。
-                        // 正常情况（22:55 弹）它恰好等于 next（23:00）；
-                        // 重启补弹（22:56 弹）则顺延到 23:01。
-                        DateTime promised = thisMinute
-                            .AddMinutes(ShutdownScheduleLogic.WarnMinutesAhead);
-                        if (promised < next.Value) promised = next.Value;
+                    result.ShouldWarn = true;
+                    result.Rule = warnRule;
+                    result.DueAt = promised;
 
-                        result.ShouldWarn = true;
-                        result.Rule = warnRule;
-                        result.DueAt = promised;
-                    }
+                    // 把"这一次关机"标成已提醒，让本轮窗口内后续分钟不再重弹。
+                    // 这里直接记账（而不是等调用方 MarkWarned）是必要的：
+                    // 调用方弹的是模态框，用户不点时它会一直挂着并阻塞 UI 线程，
+                    // 而"不点"恰恰是最常见的场景——必须在这里就把去重定死。
+                    _warnedForDue = next.Value;
+                    PromiseShutdown(promised);
+                    return result;
                 }
             }
 
@@ -194,11 +231,19 @@ namespace SeewoOpt.Services
             LogService.Write($"已承诺关机时刻：{_promisedAt:yyyy-MM-dd HH:mm}");
         }
 
-        /// <summary>记账：本分钟已提醒过</summary>
+        /// <summary>
+        /// 记账：本分钟已提醒过。
+        ///
+        /// 【保留原因】Poll 内部已自行完成"这一轮关机"的去重（见 _warnedForDue），
+        /// 不再依赖调用方记账。这个方法留给调用方在弹框返回后补记一笔日志语义，
+        /// 同时保持对外 API 兼容（单元测试仍会调它模拟窗体行为）。
+        /// </summary>
         public static void MarkWarned(DateTime now)
         {
-            _lastWarnedMinute = new DateTime(now.Year, now.Month, now.Day,
-                                             now.Hour, now.Minute, 0, now.Kind);
+            // 兜底：即使调用方没经过 Poll 直接调它，也让同一分钟的重复弹窗被挡住。
+            DateTime thisMinute = new DateTime(now.Year, now.Month, now.Day,
+                                               now.Hour, now.Minute, 0, now.Kind);
+            if (_warnedForDue == DateTime.MinValue) _warnedForDue = thisMinute;
         }
 
         /// <summary>记账：本分钟已执行关机</summary>
@@ -278,7 +323,7 @@ namespace SeewoOpt.Services
         /// <summary>清空内存中的记账状态（用于"重新同步"或设置变更后重排）</summary>
         public static void ResetRuntimeState()
         {
-            _lastWarnedMinute = DateTime.MinValue;
+            _warnedForDue = DateTime.MinValue;
             _lastShutdownMinute = DateTime.MinValue;
             _skipUntil = DateTime.MinValue;
             _promisedAt = DateTime.MinValue;
@@ -289,5 +334,8 @@ namespace SeewoOpt.Services
         /// 生产代码不应依赖它——它是为测试留的观察窗。
         /// </summary>
         internal static DateTime PromisedAtSnapshot { get { return _promisedAt; } }
+
+        /// <summary>只读快照：已经为哪一次关机弹过提醒</summary>
+        internal static DateTime WarnedForDueSnapshot { get { return _warnedForDue; } }
     }
 }

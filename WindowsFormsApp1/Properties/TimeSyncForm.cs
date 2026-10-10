@@ -829,39 +829,33 @@ namespace SeewoOpt
 
         /// <summary>
         /// 弹出"5 分钟后关机"提醒，两个选项：本次不关机 / 确认。
+        ///
+        /// 【为什么不用 MessageBox】
+        /// MessageBox 的按钮文字由系统决定（中文 Windows 上渲染成"是(Y)/否(N)"），
+        /// 无法自定义。用户明确要求按钮写「本次不关机」「确认」，
+        /// 因此这里改用自绘对话框 ShutdownWarningDialog。
+        ///
+        /// 【去重与承诺已在 Poll 内完成】
+        /// Poll 在产出 ShouldWarn 的同时就把"这一次关机已提醒"和"承诺时刻"
+        /// 都记好了（必须在弹框之前定死——弹框是模态的，用户不点时
+        /// UI 线程会一直阻塞在这里，不能依赖"弹框返回后再记账"）。
+        /// 所以本方法不再需要 MarkWarned / PromiseShutdown。
         /// </summary>
         private void HandleShutdownWarning(ShutdownService.PollResult result, DateTime now)
         {
-            // 先记账：这个模态框会一直等到用户点击才返回，
-            // 期间定时器不会再 tick（模态循环里消息仍在跑，但我们要保证
-            // 即使用户把它晾着，同一分钟内也不会再弹第二个）
-            ShutdownService.MarkWarned(now);
-
-            // 把"承诺时刻"定下来。此后 Poll 只认这个时刻——
-            // 正常情况它就是规则时刻（23:00），重启补弹时会顺延（如 23:01）。
-            // 必须在弹框**之前**写入：万一用户在框还没渲染时程序被打断，
-            // 承诺时刻已经生效，不会出现"提醒了却没承诺"的空窗。
-            ShutdownService.PromiseShutdown(result.DueAt);
-
             WriteLog($"触发关机提醒：规则 {result.Rule.Describe()}，"
                    + $"预定于 {result.DueAt:HH:mm} 关机");
 
-            DialogResult choice = MessageBox.Show(
-                string.Format(
-                    "电脑将在 {0} 分钟后关机（{1:HH:mm}）。\n\n" +
-                    "如果现在选择「本次不关机」，这一次不会关机，\n" +
-                    "但下一个预定时间仍会照常执行。",
-                    ShutdownScheduleLogic.WarnMinutesAhead,
-                    result.DueAt),
-                "即将关机提醒",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning,
-                // 默认焦点放在"本次不关机"上：误按回车不应该导致关机
-                MessageBoxDefaultButton.Button2);
+            DialogResult choice;
+            using (var dlg = new ShutdownWarningDialog(
+                (int)ShutdownScheduleLogic.WarnMinutesAhead, result.DueAt))
+            {
+                choice = dlg.ShowDialog(this);
+            }
 
             if (choice == DialogResult.Yes)
             {
-                // 用户点了"确认"：承诺时刻已在弹框前写入，这里什么都不用做——
+                // 用户点了"确认"：承诺时刻已在 Poll 内写入，这里什么都不用做——
                 // 到点由 PollShutdown 直接执行，不再二次弹框。
                 WriteLog("用户在提醒中选择\"确认\"，到点将直接关机");
             }

@@ -66,6 +66,9 @@ internal static class NtpClientTests
         TestShutdownPromiseAfterRestart();
         TestShutdownPromiseSkipDelayed();
         TestShutdownNoPromiseNoShutdown();
+        TestShutdownWarnsOncePerWindow();
+        TestShutdownWarnsAgainNextDay();
+        TestShutdownSkipResumesNextDay();
         TestShutdownSerializationRoundTrip();
         TestShutdownSerializationToleratesGarbage();
 
@@ -1295,6 +1298,152 @@ internal static class NtpClientTests
         var r = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 0, 0));
         Check("无承诺时，即使到点也不关机",
             !r.ShouldShutdown, r.ShouldShutdown ? "无承诺却关机了" : "");
+
+        ShutdownService.ResetRuntimeState();
+    }
+
+    /// <summary>
+    /// 整个提醒窗口内只弹一次提醒——用户不点按钮也不能每分钟重弹。
+    ///
+    /// 【这是实机反馈直接暴露的缺陷，务必钉死】
+    /// 用户设置 23:40 关机，实机表现是 23:40 / 23:41 / 23:42 每分钟弹一个框。
+    /// 根因：旧版去重记的是"已提醒的那一分钟"（`_lastWarnedMinute != 当前分钟`），
+    /// 只能挡住同一分钟内的三跳（20s/40s/60s），挡不住跨分钟。
+    /// 而提醒窗口本身是一整段 [23:35, 23:40)，共 5 分钟，
+    /// 于是 23:35~23:39 每分钟各弹一次，越弹越晚（各带各的承诺时刻），
+    /// 这正是截图里 23:40/23:41/23:42 三个框叠在一起的来源。
+    ///
+    /// 正确行为：同一个 DueAt 只弹一次；重启后内存态清空，才会重新弹。
+    /// </summary>
+    private static void TestShutdownWarnsOncePerWindow()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 40, DayOfWeek.Monday)
+        };
+
+        ShutdownService.ResetRuntimeState();
+
+        // 窗口第一分钟：应当命中提醒
+        var first = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 35, 0));
+        Check("23:40 关机的提醒窗口第一分钟（23:35）命中提醒",
+            first.ShouldWarn, first.ShouldWarn ? "" : "未命中提醒");
+
+        Check("23:35 弹提醒时承诺的是准点 23:40",
+            first.DueAt == new DateTime(2026, 10, 12, 23, 40, 0),
+            $"得到 {first.DueAt:yyyy-MM-dd HH:mm}");
+
+        // 后续每一分钟都不得再弹——这正是实机暴雷的地方
+        for (int m = 36; m <= 39; m++)
+        {
+            var again = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, m, 0));
+            Check($"窗口内 {m} 分不再重复弹提醒（同一轮关机只提醒一次）",
+                !again.ShouldWarn,
+                again.ShouldWarn
+                    ? $"在 23:{m:D2} 又弹了一个（会叠加成多个框）——承诺被改写成 {again.DueAt:HH:mm}"
+                    : "");
+        }
+
+        // 到点仍应关机：去重不能把主链路一起挡掉
+        var due = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 40, 0));
+        Check("窗口去重后，23:40 仍然正常触发关机",
+            due.ShouldShutdown, due.ShouldShutdown ? "" : "去重把关机也挡掉了");
+
+        // 重启（内存态归零）后，若仍在窗口内应能补弹——不能因为去重而永远不会再提醒
+        ShutdownService.ResetRuntimeState();
+        var afterRestart = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 37, 0));
+        Check("重启后仍在窗口内可以重新弹提醒（去重不该永久生效）",
+            afterRestart.ShouldWarn, afterRestart.ShouldWarn ? "" : "重启后收不到提醒");
+
+        ShutdownService.ResetRuntimeState();
+    }
+
+    /// <summary>
+    /// 跨天必须重新提醒：今天的去重记录不能把明天的提醒一起吃掉。
+    ///
+    /// 【为什么单独测】_warnedForDue 记的是绝对时刻（含日期），
+    /// 昨天的 23:40 与今天的 23:40 是两个不同值，所以自然会重新提醒。
+    /// 但若将来有人图省事把它改存成"时分"（如 23:40 不带日期），
+    /// 跨天就会永久静默——那么"每天 23:40 关机"从第二天起再也不提醒、也不关机。
+    /// 这是一条极其隐蔽的失效路径，必须钉住。
+    /// </summary>
+    private static void TestShutdownWarnsAgainNextDay()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 40, DayOfWeek.Monday, DayOfWeek.Tuesday,
+                     DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday,
+                     DayOfWeek.Saturday, DayOfWeek.Sunday)
+        };
+
+        ShutdownService.ResetRuntimeState();
+
+        // 第一天：10/12（周一）走完整轮
+        var day1 = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 35, 0));
+        Check("第一天 23:35 命中提醒（前提）",
+            day1.ShouldWarn, day1.ShouldWarn ? "" : "第一天就没提醒");
+
+        var day1Due = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 40, 0));
+        Check("第一天 23:40 执行关机（前提）",
+            day1Due.ShouldShutdown, day1Due.ShouldShutdown ? "" : "第一天没关机");
+
+        // 第二天：10/13（周二）必须重新提醒、重新关机
+        var day2 = ShutdownService.Poll(rules, new DateTime(2026, 10, 13, 23, 35, 0));
+        Check("第二天 23:35 仍然命中提醒（去重记录不得跨天静默）",
+            day2.ShouldWarn, day2.ShouldWarn ? "第二天被昨天的记录吃掉了，不会再提醒" : "");
+
+        var day2Due = ShutdownService.Poll(rules, new DateTime(2026, 10, 13, 23, 40, 0));
+        Check("第二天 23:40 仍然执行关机",
+            day2Due.ShouldShutdown, day2Due.ShouldShutdown ? "第二天不再关机了" : "");
+
+        ShutdownService.ResetRuntimeState();
+    }
+
+    /// <summary>
+    /// 选了"本次不关机"后，同一天不得再问、也不得关机；
+    /// 但第二天必须恢复正常提醒与关机。
+    ///
+    /// 【为什么必须测 skip 之后的跨天】_skipUntil 与 _warnedForDue 都是内存态。
+    /// 若不验证"第二天恢复"，就可能出现"跳过一次后永远不再关机"——
+    /// 那对教室一体机是致命的：以为设了定时关机，实际从此再没关过。
+    /// </summary>
+    private static void TestShutdownSkipResumesNextDay()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 40, DayOfWeek.Monday, DayOfWeek.Tuesday,
+                     DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday,
+                     DayOfWeek.Saturday, DayOfWeek.Sunday)
+        };
+
+        ShutdownService.ResetRuntimeState();
+
+        // 第一天提醒后选"本次不关机"
+        var warn = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 35, 0));
+        Check("第一天 23:35 命中提醒（前提）",
+            warn.ShouldWarn, warn.ShouldWarn ? "" : "第一天没提醒");
+
+        ShutdownService.SkipOnce(warn.DueAt);
+
+        // 同一天到点不关机
+        var sameDay = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 40, 0));
+        Check("选了「本次不关机」后，当天 23:40 不关机",
+            !sameDay.ShouldShutdown, sameDay.ShouldShutdown ? "跳过了却仍然关机" : "");
+
+        // 同一天窗口内也不再问
+        var sameDayAgain = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 38, 0));
+        Check("选了「本次不关机」后，当天窗口内不再重复询问",
+            !sameDayAgain.ShouldWarn,
+            sameDayAgain.ShouldWarn ? "跳过之后又弹了提醒" : "");
+
+        // 第二天必须恢复：提醒 + 关机都要回来
+        var nextDay = ShutdownService.Poll(rules, new DateTime(2026, 10, 13, 23, 35, 0));
+        Check("第二天 23:35 恢复提醒（跳过只影响当天）",
+            nextDay.ShouldWarn, nextDay.ShouldWarn ? "" : "跳过之后第二天不再提醒");
+
+        var nextDayDue = ShutdownService.Poll(rules, new DateTime(2026, 10, 13, 23, 40, 0));
+        Check("第二天 23:40 恢复关机（跳过只影响当天）",
+            nextDayDue.ShouldShutdown, nextDayDue.ShouldShutdown ? "" : "跳过之后第二天不再关机");
 
         ShutdownService.ResetRuntimeState();
     }
