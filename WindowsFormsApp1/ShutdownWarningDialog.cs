@@ -37,6 +37,14 @@ namespace SeewoOpt
     /// DialogResult 的语义与 MessageBox 保持一致：
     /// Yes = 用户点了「确认」，No = 用户点了「本次不关机」。
     /// 这样调用方从 MessageBox 迁移过来时判定逻辑一行都不用改。
+    ///
+    /// 【关闭路径的约定：除了「确认」，一切都不关机】
+    ///   · 点「本次不关机」→ No
+    ///   · 点右上角 X      → Cancel（见构造末尾的 FormClosing 处理）
+    ///   · 按 Esc / 回车   → 走 CancelButton / AcceptButton，都指「本次不关机」
+    ///   · 异常终止        → None
+    /// 以上除 Yes 外全部由调用方视为"本次不关机"。调用方用的是
+    /// "只有 Yes 才关机"的白名单，所以这里多一个返回值也不会误关。
     /// </summary>
     public class ShutdownWarningDialog : Form
     {
@@ -209,6 +217,28 @@ namespace SeewoOpt
 
             this.AcceptButton = btnSkip;   // 回车 = 本次不关机（安全侧）
             this.CancelButton = btnSkip;   // Esc 也走安全侧，避免手滑关机
+
+            // ---------- 关闭路径的契约 ----------
+            //
+            // 【为什么下面这段必须存在，不能靠"默认行为"】
+            // 用户明确要求：点右上角 X 也必须算"本次不关机"。
+            //
+            // X 走的是窗体的 FormClosing，而 ShowDialog 的返回值取决于
+            // 窗体的 DialogResult 属性。基础 Form 在按 X 关闭时，
+            // DialogResult 会停留在 None（不是 Cancel）——虽然调用方
+            // 用的是"只有 Yes 才关机"的白名单，None 也安全；
+            // 但把这里钉成 Cancel 有额外好处：
+            //   · 调用方的日志能区分"点了按钮"还是"关了框"，
+            //     排查时一眼看出用户当时做了什么；
+            //   · 语义上 Cancel 本来就比 None 更准确——用户确实是取消了。
+            //
+            // 【为什么不能改成"按 X 时当成 Yes"】
+            // 那等于"关掉框就关机"，与用户要求完全相反。
+            this.FormClosing += (s, e) =>
+            {
+                if (this.DialogResult == DialogResult.None)
+                    this.DialogResult = DialogResult.Cancel;
+            };
         }
 
         /// <summary>

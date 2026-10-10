@@ -853,9 +853,24 @@ namespace SeewoOpt
                 choice = dlg.ShowDialog(this);
             }
 
-            if (choice == DialogResult.Yes)
+            // 【只有明确点"确认"才关机，其余一切情况都算"本次不关机"】
+            //
+            // 这个判断刻意写成"白名单"而不是"if (Yes) ... else ..."。
+            // 值只有 Yes 才走关机，因此以下全部落到安全侧：
+            //   · No      —— 点了"本次不关机"
+            //   · Cancel  —— 点了右上角 X，或按了 Esc
+            //   · None    —— 窗体被异常终止等非正常路径
+            //
+            // 用户明确要求"点 X 也应该视为本次不关机"。用白名单后，
+            // 这个约定由结构本身保证：**将来无论新增什么返回值，
+            // 默认都落在"不关机"这一侧**，不会因为漏写一个分支而误关。
+            // 反过来说，若写成 if (Yes) else 虽然当前结果相同，
+            // 但"哪些值算同意"就没被表达出来，加分支时容易改错。
+            bool userConfirmed = (choice == DialogResult.Yes);
+
+            if (userConfirmed)
             {
-                // 用户点了"确认"：承诺时刻已在 Poll 内写入，这里什么都不用做——
+                // 承诺时刻已在 Poll 内写入，这里什么都不用做——
                 // 到点由 PollShutdown 直接执行，不再二次弹框。
                 WriteLog("用户在提醒中选择\"确认\"，到点将直接关机");
             }
@@ -864,7 +879,14 @@ namespace SeewoOpt
                 // SkipOnce 内部会连带撤销任何已下发的系统关机倒计时
                 // （见其注释：只改内存标记挡不住已经发出去的关机命令）。
                 ShutdownService.SkipOnce(result.DueAt);
-                WriteLog("用户在提醒中选择\"本次不关机\"，已跳过本次并尝试撤销系统关机");
+
+                // 区分两种"非确认"并分别记日志，便于日后排查用户到底做了什么。
+                // 行为上两者完全一致（都跳过），差别只在日志措辞。
+                string how = (choice == DialogResult.No)
+                    ? "点了\"本次不关机\""
+                    : $"关闭了提醒框（{choice}）";
+                WriteLog($"用户在提醒中{how}，已跳过本次并尝试撤销系统关机");
+
                 if (trayIcon != null)
                 {
                     trayIcon.ShowBalloonTip(3000, "已跳过本次关机",
@@ -1837,47 +1859,58 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
             // 后续 WriteLog 会因目录不存在而静默失败，导致日志永久丢失。
             LogService.Enabled = false;
 
-            // 1. 删除日志目录
+            // 1. 删除数据根目录（日志与更新缓存都在其下）
+            //
+            // 【为什么这一步就够了，不再单独删 updates】
+            // 数据根目录是 %LOCALAPPDATA%\SeewoOpt\，其结构为：
+            //     SeewoOpt\startup.log      ← 日志
+            //     SeewoOpt\updates\...      ← 更新缓存
+            // updates 是它的**子目录**，递归删除根目录时一并被删掉。
+            //
+            // 早先这里分两步删（先删日志目录、再删 updates），是因为
+            // 当时的 updates 路径写的是同一个根、删除顺序上看着"各自独立"，
+            // 实际上第二步是多余的。合并为一步，少一次可能失败的 IO。
             try
             {
-                string logDir = Path.GetDirectoryName(Program.LogFilePath);
-                if (Directory.Exists(logDir))
+                string dataDir = LogService.LogDirectory;
+                if (Directory.Exists(dataDir))
                 {
-                    Directory.Delete(logDir, true);
-                    AddLog($"√ 已删除日志目录: {logDir}\n", Color.Green);
+                    Directory.Delete(dataDir, true);
+                    AddLog($"√ 已删除数据目录: {dataDir}\n", Color.Green);
                 }
                 else
                 {
-                    AddLog("日志目录不存在，跳过\n", Color.Gray);
+                    AddLog("数据目录不存在，跳过\n", Color.Gray);
                 }
             }
             catch (Exception ex)
             {
-                AddLog($"× 删除日志目录失败: {ex.Message}\n", Color.Red);
+                AddLog($"× 删除数据目录失败: {ex.Message}\n", Color.Red);
                 success = false;
             }
 
-
-            // 2. 删除更新目录
+            // 2. 清理旧版本遗留的数据目录（TimeSyncTool → SeewoOpt 改名前的目录）
+            //
+            // 【为什么卸载时要管旧目录】改名是有意不做自动迁移的
+            // （理由见 LogService.LogDirectory 注释），但"卸载"的语义是
+            // "把本程序在用户机器上的痕迹清干净"。如果只删新目录，
+            // 老用户机器上会永远留着 %LOCALAPPDATA%\TimeSyncTool\。
+            // 这里顺手清掉——删不掉也不算失败（可能有别人的文件或权限问题），
+            // 只记一条日志，不置 success = false。
             try
             {
-                string updateDir = Path.Combine(
+                string legacyDir = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "TimeSyncTool", "updates");
-                if (Directory.Exists(updateDir))
+                    "TimeSyncTool");
+                if (Directory.Exists(legacyDir))
                 {
-                    Directory.Delete(updateDir, true);
-                    AddLog($"√ 已删除更新目录: {updateDir}\n", Color.Green);
-                }
-                else
-                {
-                    AddLog("更新目录不存在，跳过\n", Color.Gray);
+                    Directory.Delete(legacyDir, true);
+                    AddLog($"√ 已清理旧版本数据目录: {legacyDir}\n", Color.Green);
                 }
             }
             catch (Exception ex)
             {
-                AddLog($"× 删除更新目录失败: {ex.Message}\n", Color.Red);
-                success = false;
+                AddLog($"· 旧版本数据目录未能清理（不影响卸载）: {ex.Message}\n", Color.Gray);
             }
 
 
@@ -1885,7 +1918,12 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
             try
             {
                 SettingsStore.Delete();
-                AddLog("√ 已删除注册表项: HKCU\\Software\\TimeSyncTool\n", Color.Green);
+                // 注册表路径仍保留 TimeSyncTool（见 SettingsStore.REGISTRY_PATH 注释：
+                // 它是已写入注册表的键名，改名会让老用户的设置"消失"）。
+                // 这里如实打印实际路径，不要写成新名字——否则日志与实际不符，
+                // 排查时会被误导。
+                AddLog($"√ 已删除注册表项: HKCU\\Software\\{SettingsStore.RegistryPathForDisplay}\n",
+                       Color.Green);
             }
             catch (Exception ex)
             {

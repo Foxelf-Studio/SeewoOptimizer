@@ -20,9 +20,18 @@ namespace SeewoOpt
         // GitHub 配置
         private const string GITHUB_API = "https://api.github.com/repos/Foxelf-Studio/SeewoOptimizer/releases/latest";
         private const string GITHUB_USER_AGENT = "SeewoOptimizer-Updater";
-        private static readonly string UPDATE_DIR = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "TimeSyncTool", "updates");
+
+        /// <summary>
+        /// 更新缓存目录。
+        ///
+        /// 【为什么引用 LogService 而不是自己拼路径】
+        /// 早先这里自己写了 Path.Combine(LocalApplicationData, "TimeSyncTool", "updates")，
+        /// 与 LogService 里的日志目录各拼各的——同一串目录名散在两处，
+        /// 改名时必然漏一处（这次改 SeewoOpt 时就差点只改到一边）。
+        /// 现在统一由 LogService 定义，二者是同一目录下的兄弟关系，
+        /// 目录名只此一处。
+        /// </summary>
+        private static readonly string UPDATE_DIR = LogService.UpdateDirectory;
 
         // 更新完成标志（由后台更新线程写、UI 线程读，必须 volatile，
         // 否则 UI 侧 Timer 可能读到缓存值导致窗口一直卡在托盘不退出）

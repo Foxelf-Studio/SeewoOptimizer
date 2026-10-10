@@ -120,11 +120,30 @@ namespace SeewoOpt.Services
     /// 代码命名空间已统一为 SeewoOpt，但这里**必须保留 TimeSyncTool**。
     /// 命名空间是编译期概念，改名只影响源码；注册表路径是运行时数据，
     /// 改了等于换了一个存储位置——已装用户的全部设置会被静默重置为默认值。
-    /// 二者不可混淆。同理见 AutoStartService.TaskName 与更新缓存目录。
+    /// 二者不可混淆。同理见 AutoStartService.TaskName（计划任务名，
+    /// 同样是已写入系统的外部键）。
+    ///
+    /// 【反例：日志目录是可以改的】%LOCALAPPDATA% 下的数据目录
+    /// 在 2026-10-11 从 TimeSyncTool 改成了 SeewoOpt，因为它只存日志与
+    /// 可再生的更新缓存、不存任何用户配置，丢掉不损失用户数据。
+    /// 判断"能不能改名"的标准是**里面有没有不可再生的用户数据**，
+    /// 而不是"名字看起来像不像内部代号"。
     /// </summary>
     public static class SettingsStore
     {
         private const string REGISTRY_PATH = @"Software\TimeSyncTool";
+
+        /// <summary>
+        /// 供日志/界面显示的注册表路径（不含 HKCU 前缀）。
+        ///
+        /// 【为什么暴露出来】卸载流程要在日志里打印实际删除的注册表路径。
+        /// 早先那里的字面量是手写的，改名时就可能与真实路径不一致，
+        /// 排查时被日志误导。改为从同一常量派生，日志永远与实际一致。
+        /// </summary>
+        public static string RegistryPathForDisplay
+        {
+            get { return REGISTRY_PATH; }
+        }
 
         /// <summary>
         /// 从注册表读取设置。

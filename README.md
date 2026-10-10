@@ -26,7 +26,7 @@
 | 🔄 **开机自启** | 通过 Windows 任务计划实现用户登录后自动启动（无需管理员权限） |
 | 🤫 **静默启动** | 启动后自动隐藏到系统托盘，不干扰日常使用 |
 | 📦 **自动更新** | 后台检测 GitHub Releases，静默下载并替换，无弹窗无打扰 |
-| 📝 **详细日志** | 所有操作记录在 `%LOCALAPPDATA%\TimeSyncTool\startup.log` |
+| 📝 **详细日志** | 所有操作记录在 `%LOCALAPPDATA%\SeewoOpt\startup.log` |
 | 🧹 **一键卸载** | 输入暗号 `0319` 后清理所有日志、注册表、任务计划（需手动删除 exe） |
 | 🌐 **开源仓库** | 内置跳转按钮，一键访问 GitHub 源码 |
 
@@ -152,10 +152,15 @@ sequenceDiagram
 
 ### 6. 卸载清理
 
-- 删除 `%LOCALAPPDATA%\TimeSyncTool` 下所有子目录
+- 删除 `%LOCALAPPDATA%\SeewoOpt`（日志与更新缓存）
+- 顺带清理旧版本遗留的 `%LOCALAPPDATA%\TimeSyncTool`
 - 删除注册表 `HKCU\Software\TimeSyncTool`
 - 删除任务计划 `TimeSyncTool`
 - 需要输入暗号 `0319` 确认，防止老师看它不顺眼卸载了
+
+> 注册表项与任务计划名保留 `TimeSyncTool`，是因为它们是**已经写入系统的
+> 外部键**——改名会让老用户已保存的设置被重置、已注册的自启任务失联。
+> 数据目录只存日志与可再生的更新缓存，不含用户配置，因此已改名为 `SeewoOpt`。
 
 ---
 

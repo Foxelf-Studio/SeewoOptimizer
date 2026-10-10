@@ -26,10 +26,44 @@ namespace SeewoOpt.Services
     /// </summary>
     public static class LogService
     {
-        /// <summary>日志根目录：%LOCALAPPDATA%\TimeSyncTool</summary>
+        /// <summary>
+        /// 本程序在 %LOCALAPPDATA% 下的数据根目录名。
+        ///
+        /// 【为什么要有这个常量，而不是各处自己拼字符串】
+        /// 这个目录下同时放着日志（startup.log）与更新缓存（updates\），
+        /// 分属 LogService 与 Program 两个类使用，卸载流程还要整体删除。
+        /// 早先三处各自硬编码了同一串字面量，改名时漏掉任何一处，
+        /// 就会变成"日志写在新目录、卸载删的是旧目录"这类错位。
+        /// 统一到这一处后，改名只需改这一行。
+        ///
+        /// 【2026-10-11 从 "TimeSyncTool" 改为 "SeewoOpt"】
+        /// 旧名是项目早期的代号，界面上早已统一为"陈叔叔希沃优化助手"，
+        /// 唯独这个用户能在资源管理器里看到的目录名还留着旧名，观感不一致。
+        /// 改名会留一份旧数据，见 LogDirectory 的注释。
+        /// </summary>
+        public const string DataRootName = "SeewoOpt";
+
+        /// <summary>
+        /// 日志根目录：%LOCALAPPDATA%\SeewoOpt
+        ///
+        /// 【改名后旧数据怎么办——这是有意的取舍】
+        /// 目录名从 TimeSyncTool 改为 SeewoOpt 后，老用户机器上
+        /// %LOCALAPPDATA%\TimeSyncTool\ 里的旧日志与旧更新缓存不会被自动带走。
+        /// 不做自动迁移，理由：
+        ///   · 这里只有**日志与可再生的更新缓存**，没有任何用户配置
+        ///     （设置存在注册表里，不在这个目录），丢掉不损失用户数据；
+        ///   · 自动迁移要处理"新旧目录同时存在""迁移到一半失败"等分支，
+        ///     为一个纯日志目录引入这些复杂度不划算；
+        ///   · 旧的更新缓存若被迁移过来，反而可能让程序误判
+        ///     "有一个待安装的旧版本"。
+        /// 因此让新目录干净地重新开始，旧目录由用户自行删除即可。
+        /// </summary>
         public static readonly string LogDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "TimeSyncTool");
+            DataRootName);
+
+        /// <summary>更新缓存目录：%LOCALAPPDATA%\SeewoOpt\updates</summary>
+        public static readonly string UpdateDirectory = Path.Combine(LogDirectory, "updates");
 
         /// <summary>日志文件完整路径</summary>
         public static readonly string LogFilePath = Path.Combine(LogDirectory, "startup.log");
