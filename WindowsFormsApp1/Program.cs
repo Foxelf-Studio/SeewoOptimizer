@@ -76,23 +76,29 @@ namespace SeewoOpt
         {
             try
             {
-                // 开始本次运行的日志分段：裁剪旧运行 + 写分隔头。
-                // 放在最前面（早于单实例检查）是为了让每一次 Main 进入都
-                // 有完整的一段——否则"已有实例运行"那条退出路径只会在
-                // 上一次的日志段末尾甩一个孤立的结束标记。
+                // 【单实例检查必须在开日志分段之前】
+                // 日志文件是**多进程共用**的，而分段模型默认"同一时刻只有一次运行在写"。
+                // 若第二个实例先开一段、又匆匆写下自己的结束标记，而第一个实例仍在运行，
+                // 那么第一个实例后续的日志就会插到第二个实例的结束标记之后——
+                // 实测就是这样：第二个实例（只活了 1 秒）的分段把第一个实例
+                // 剩余的十几行收尾日志整段吞了进去，读日志的人会彻底误判。
+                //
+                // 所以顺序改为：先抢单实例，抢不到就**不碰日志文件**，
+                // 只弹一个提示框然后退出。抢到了才开分段——此时可以确保
+                // 整个文件只有本进程在写。
+                if (!IsSingleInstance())
+                {
+                    // 抢不到实例说明已有程序在跑，此刻绝不能动日志文件。
+                    // 提示框在下面（需要在显示前确保日志服务不被误用）。
+                    MessageBox.Show("程序已在运行中。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                // 抢到实例后才开分段：裁剪旧运行 + 写分隔头
                 LogService.BeginSession();
 
                 // 检查是否有待应用的更新（更新后重启）- 只处理不弹窗
                 HandlePendingUpdate();
-
-                // 检查是否已有实例在运行
-                if (!IsSingleInstance())
-                {
-                    _exitReason = "已有实例在运行";
-                    WriteLog("已有实例运行，退出");
-                    MessageBox.Show("程序已在运行中。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
 
                 // 程序集解析事件（必须在加载任何外部程序集前注册）
                 AppDomain.CurrentDomain.AssemblyResolve += CurrentDomain_AssemblyResolve;
@@ -166,11 +172,13 @@ namespace SeewoOpt
                 //
                 // 同步线程是独立线程，主线程走完 Application.Run 返回时它可能还在跑。
                 // 若此刻就写结束标记，它的最后两条日志（"同步线程正常结束"、
-                // "同步线程 finally 块"）会落到标记**之下**，看上去像属于下一次运行——
-                // 实测确实如此，三条日志时间戳完全相同。
+                // "同步线程 finally 块"）会落到标记**之下**，看上去像属于下一次运行。
                 //
-                // 这里先请求取消再 Join，给线程一个收尾窗口。它是 IsBackground，
-                // 所以超时也不会拖住进程退出，只是日志会缺个尾巴。
+                // 【曾经失败的原因】早先 WaitForBackgroundWork 拿不到窗体实例——
+                // 查 _activeInstance 的清理被挂在窗体的 FormClosed 上，而
+                // FormClosed 早于 Application.Run 返回、也就早于这里，
+                // 于是引用已是 null，Join 被静默跳过，问题照旧。
+                // 现在清理改由下面的 ClearActiveInstance 显式负责。
                 TimeSyncForm.WaitForBackgroundWork(BACKGROUND_DRAIN_TIMEOUT_MS);
 
                 ReleaseMutex();
@@ -181,19 +189,38 @@ namespace SeewoOpt
                 // 日志里就没有结束标记，下次启动一眼能看出上次是异常终止的。
                 // 重复调用是安全的：LogService.EndSession 自身幂等。
                 LogService.EndSession(_exitReason);
+
+                // 收尾彻底结束后才松手，保证引用覆盖整个等待窗口
+                TimeSyncForm.ClearActiveInstance();
             }
         }
 
         /// <summary>
-        /// 检查是否只有一个实例在运行
+        /// 检查是否只有一个实例在运行。
+        ///
+        /// 【失败时不能留下 mutex 对象】`new Mutex(true, name, out createdNew)` 在
+        /// createdNew=false 时，本进程**并未获得**这个互斥体——它只是打开了一个
+        /// 指向别人已持有互斥体的句柄。此时若去 ReleaseMutex()，会抛
+        /// "Object synchronization method was called from an unsynchronized
+        /// block of code"（实测日志里确实出现过这条）。
+        /// 所以未拿到所有权时立刻把句柄关掉并置空，让 ReleaseMutex 无事可做。
         /// </summary>
         private static bool IsSingleInstance()
         {
             try
             {
                 // 尝试创建互斥体
-                singleInstanceMutex = new Mutex(true, "TimeSyncTool_UniqueMutex", out bool createdNew);
-                return createdNew;
+                bool createdNew;
+                singleInstanceMutex = new Mutex(true, "TimeSyncTool_UniqueMutex", out createdNew);
+
+                if (!createdNew)
+                {
+                    // 没拿到所有权：立即释放句柄，且不让 ReleaseMutex 再碰它
+                    try { singleInstanceMutex.Close(); } catch { }
+                    singleInstanceMutex = null;
+                    return false;
+                }
+                return true;
             }
             catch (Exception ex)
             {

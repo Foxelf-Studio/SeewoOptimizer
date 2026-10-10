@@ -124,6 +124,7 @@ namespace SeewoOpt.Services
 
             _sessionStart = DateTime.Now;
             _sessionEnded = false;      // 新一次运行开始，重新允许写结束标记
+            _sessionStarted = true;     // 标记本进程确实开过分段
 
             try
             {
@@ -174,6 +175,17 @@ namespace SeewoOpt.Services
         private static bool _sessionEnded;
 
         /// <summary>
+        /// 本进程是否调用过 <see cref="BeginSession"/>。
+        ///
+        /// 【为什么需要它】"已有实例在运行"那条退出路径会走到 Main 的 finally，
+        /// 而 finally 里会调 EndSession。那个进程从未开过分段，若允许它写结束标记，
+        /// 就会把一条收尾插进**正在运行的另一个实例**的分段中间——
+        /// 实测就是这个效果：第二实例只活了 1 秒，却用一个结束标记
+        /// 把第一实例剩余的十几行收尾日志整段截断在了外面。
+        /// </summary>
+        private static bool _sessionStarted;
+
+        /// <summary>
         /// 结束本次运行，写入结尾标记。重复调用只生效一次。
         ///
         /// 有这条标记时，下次启动就能一眼看出上一段是正常退出还是中途死掉
@@ -187,6 +199,10 @@ namespace SeewoOpt.Services
             {
                 lock (_writeLock)
                 {
+                    // 本进程压根没开过分段（例如"已有实例在运行"那条路径），
+                    // 就不该写结束标记——否则会在别人正在写的分段里
+                    // 插一条不属于它的收尾，把整段日志的归属搞乱。
+                    if (!_sessionStarted) return;
                     if (_sessionEnded) return;      // 幂等：只写一次
                     _sessionEnded = true;
 

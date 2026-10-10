@@ -24,8 +24,27 @@ namespace SeewoOpt
         /// Program.Main 的 finally 里。要让结束标记压在同步线程最后一条日志之后，
         /// Main 就得能拿到这个线程。用静态引用而不是把 thread 提为公共字段，
         /// 是为了让同步线程的生命周期仍归窗体自己管。
+        ///
+        /// 【为什么不能在 FormClosed 里清空它——这是个踩过的坑】
+        /// 曾把它写成"窗体关闭时置 null"，结果 Main 的 finally 拿到的是 null，
+        /// WaitForBackgroundWork 直接 return，Join 根本没执行，
+        /// 同步线程的最后两条日志照样落在结束标记之下。
+        ///
+        /// 原因：窗体关闭（FormClosed）发生得比 Main 的 finally **更早**——
+        /// Application.Run 要等窗体彻底销毁才返回。所以"清引用"这件事
+        /// 必须发生在收尾之后，由 <see cref="ClearActiveInstance"/> 显式调用，
+        /// 不能挂在窗体自己的关闭事件上。
         /// </summary>
         private static TimeSyncForm _activeInstance;
+
+        /// <summary>
+        /// 收尾完成后清掉静态引用。由 Program 在写日志结束标记之后调用，
+        /// 保证引用在整个收尾窗口内都有效。
+        /// </summary>
+        public static void ClearActiveInstance()
+        {
+            _activeInstance = null;
+        }
 
         /// <summary>
         /// 等待本窗体的后台工作线程（同步线程）结束。
@@ -43,10 +62,8 @@ namespace SeewoOpt
         /// 消息循环已经停了，UI 线程一旦停在这里 Join，那些 Invoke 就永远
         /// 等不到人来处理，双方互锁。
         ///
-        /// 所以这里加了双重保险：
-        ///   1. 只有在取消请求**之后**线程仍在活时才等——正常路径下同步线程
-        ///      早已结束，根本不会走到 Join；
-        ///   2. 等待用带超时的 Join，且超时即返回，不无限等。
+        /// 所以同步线程收尾时的 UI 调用已改为 BeginInvoke（异步投递、投递即返回），
+        /// 这里再配合带超时的 Join，双重保险。
         /// </summary>
         /// <param name="timeoutMs">最长等待毫秒数</param>
         public static void WaitForBackgroundWork(int timeoutMs)
@@ -371,11 +388,10 @@ namespace SeewoOpt
                     trayIcon.Visible = false;
                     trayIcon.Dispose();
                 }
-
-                // 窗体已关闭，清掉静态引用，避免 WaitForBackgroundWork
-                // 之后的调用拿到一个已经 Dispose 的实例。
-                if (object.ReferenceEquals(_activeInstance, this))
-                    _activeInstance = null;
+                // 注意：这里**不能**清 _activeInstance。
+                // FormClosed 早于 Application.Run 返回，也就早于 Main 的 finally；
+                // 一旦在这里置 null，收尾时就拿不到同步线程，Join 会静默跳过。
+                // 清理由 Program 在收尾完成后调 ClearActiveInstance 负责。
             };
         }
 
