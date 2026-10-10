@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AssemblyName>DialogRender</AssemblyName>
+    <RootNamespace>SeewoOpt.Tools</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>7.3</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      渲染验证工具：把 ShutdownWarningDialog 真的实例化并 DrawToBitmap 成 PNG。
+
+      【为什么需要它】沙箱里无法启动常驻 GUI 进程（进程会被外部清理），
+      所以"改完样式凭感觉说好了"是不可接受的。本工具在 net48 下
+      加载真实窗体类，调用 DrawToBitmap 拿到真实渲染结果，
+      落盘成 PNG 供人眼核对——这是没有真机时唯一能拿到"真实像素"的办法。
+
+      【为什么是 net48 而不是像 NtpClientTests 那样用 net10】
+      ShutdownWarningDialog 依赖 System.Windows.Forms（net48 的 WinForms），
+      net10 的 WinForms 与 net48 的实现有差异，测出来的不是产品那份。
+      这里必须用与产品完全相同的框架与窗体类。
+
+      需要链接的源码：对话框本身 + 它引用的 Services（LogService 等）。
+      ShutdownWarningDialog 只用到 System.Drawing/System.Windows.Forms，
+      不依赖任何 Services，因此只需链接它自己。
+    -->
+    <Compile Include="DialogRender.cs" />
+    <Compile Include="..\WindowsFormsApp1\ShutdownWarningDialog.cs" />
+  </ItemGroup>
+</Project>
