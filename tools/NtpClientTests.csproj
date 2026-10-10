@@ -33,5 +33,14 @@
     -->
     <Compile Include="..\WindowsFormsApp1\Services\ShutdownSchedule.cs" />
     <Compile Include="..\WindowsFormsApp1\Services\SettingsStore.cs" />
+    <!--
+      ShutdownService 本身（不只是它的纯逻辑）也要编进来。
+      原因：本轮把"到点关机"的判定从"每轮从规则实时推导"改成了
+      "由承诺时刻驱动"，而承诺状态（_promisedAt）与记账状态都活在这个类里。
+      若只测 ShutdownScheduleLogic 而跳过它，就测不到"承诺后到点是否真会关"
+      这条主链路——而那恰恰是删掉二次确认框之后唯一的关机触发路径。
+      它只依赖 System + LogService（已在上方编入），无 UI 依赖。
+    -->
+    <Compile Include="..\WindowsFormsApp1\Services\ShutdownService.cs" />
   </ItemGroup>
 </Project>

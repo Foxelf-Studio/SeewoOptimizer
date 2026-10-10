@@ -237,16 +237,23 @@ namespace SeewoOpt.Services
         /// <summary>
         /// 该不该在 moment 这一刻弹出"5 分钟后关机"的提醒。
         ///
-        /// 判定方式：某条规则的下一次触发时刻减去提前量，正好落在 moment。
-        /// 这样"提醒"和"关机"共用同一套时刻计算，不会出现两处逻辑各算各的、
-        /// 慢慢错开的问题。
+        /// 判定方式：某条规则的下一次触发时刻距 moment **不超过**提前量，
+        /// 且尚未到点，就算命中提醒窗口。即窗口是 [触发时刻-提前量, 触发时刻)
+        /// 这一段，而不是仅仅"提前量那一分钟"。
+        ///
+        /// 【为什么窗口是一整段而不是一分钟】
+        /// 原先只命中"提前量那一分钟"（如 23:00 的规则只认 22:55 这一分钟），
+        /// 因为正常运行下 22:55 一定会被巡检捕到。但重启会打破这个假设：
+        /// 22:56 重启后 22:55 早已过去，若只认那一分钟，这次提醒就永远补不回来了。
+        /// 把窗口放宽成一段后，22:56~22:59 之间重启都能补弹提醒，
+        /// 用户仍有机会选"本次不关机"。
         /// </summary>
         public static ShutdownTimeRule FindRuleToWarn(
             IEnumerable<ShutdownTimeRule> rules, DateTime moment)
         {
             if (rules == null) return null;
 
-            // 把提醒时刻归到"分钟"这一档上比较：moment 落在提醒那一分钟内即算命中。
+            // 把提醒时刻归到"分钟"这一档上比较
             DateTime thisMinute = new DateTime(moment.Year, moment.Month, moment.Day,
                                                moment.Hour, moment.Minute, 0, moment.Kind);
 
@@ -257,8 +264,11 @@ namespace SeewoOpt.Services
                 DateTime? next = NextOccurrence(rule, thisMinute.AddMinutes(-1));
                 if (!next.HasValue) continue;
 
-                DateTime warnAt = next.Value.AddMinutes(-WarnMinutesAhead);
-                if (warnAt == thisMinute) return rule;
+                // 距触发还有多少分钟（>0；NextOccurrence 保证严格在下一分钟之后）
+                double minutesLeft = (next.Value - thisMinute).TotalMinutes;
+
+                // 落在 [0, 提前量] 之内即算窗口内
+                if (minutesLeft > 0 && minutesLeft <= WarnMinutesAhead) return rule;
             }
             return null;
         }

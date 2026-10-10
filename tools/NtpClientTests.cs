@@ -62,6 +62,10 @@ internal static class NtpClientTests
         TestShutdownNextOccurrence();
         TestShutdownWarnWindow();
         TestShutdownDecidePriority();
+        TestShutdownPromiseNormalPath();
+        TestShutdownPromiseAfterRestart();
+        TestShutdownPromiseSkipDelayed();
+        TestShutdownNoPromiseNoShutdown();
         TestShutdownSerializationRoundTrip();
         TestShutdownSerializationToleratesGarbage();
 
@@ -1062,7 +1066,13 @@ internal static class NtpClientTests
     }
 
     /// <summary>
-    /// 提醒窗口：关机前 5 分钟那一刻必须命中提醒，其余时刻不命中。
+    /// 提醒窗口：关机前 5 分钟**整段**（[触发-5min, 触发)）都必须命中提醒。
+    ///
+    /// 【为什么窗口是一段而不是一分钟】
+    /// 原先只认"提前量那一分钟"（23:00 的规则只认 22:55 这一分钟），
+    /// 因为正常运行下 22:55 一定会被 20 秒轮询捕到。但重启会打破这个假设：
+    /// 22:56 重启后 22:55 早已过去，若只认那一分钟，这次提醒永远补不回来。
+    /// 放宽成一段后，22:56~22:59 之间重启都能补弹，用户仍能选"本次不关机"。
     /// </summary>
     private static void TestShutdownWarnWindow()
     {
@@ -1086,11 +1096,19 @@ internal static class NtpClientTests
         Check("关机前 5 分钟那一整分钟内都命中（含第 59 秒）",
             ShutdownScheduleLogic.FindRuleToWarn(rules, warnAt.AddSeconds(59)) != null);
 
-        Check("关机前 6 分钟：不提醒",
-            ShutdownScheduleLogic.FindRuleToWarn(rules, warnAt.AddMinutes(-1)) == null);
+        // 窗口是一整段：22:56 / 22:57 / 22:58 / 22:59 全部命中。
+        // 这正是"重启后补弹"赖以成立的前提——如果这里只认 22:55，
+        // 22:56 重启的机器就永远收不到提醒，会静默地准点关机。
+        for (int offset = 1; offset <= 4; offset++)
+        {
+            DateTime probe = warnAt.AddMinutes(offset);
+            Check($"关机前 {5 - offset} 分钟（{probe:HH:mm}）：仍在窗口内，命中",
+                ShutdownScheduleLogic.FindRuleToWarn(rules, probe) != null,
+                $"检查时刻 {probe:HH:mm}");
+        }
 
-        Check("关机前 4 分钟：不提醒",
-            ShutdownScheduleLogic.FindRuleToWarn(rules, warnAt.AddMinutes(1)) == null);
+        Check("关机前 6 分钟：不提醒（窗口尚未开始）",
+            ShutdownScheduleLogic.FindRuleToWarn(rules, warnAt.AddMinutes(-1)) == null);
 
         Check("关机时刻本身：不触发提醒（该走关机分支）",
             ShutdownScheduleLogic.FindRuleToWarn(rules, shutdownAt) == null);
@@ -1137,6 +1155,148 @@ internal static class NtpClientTests
             ShutdownScheduleLogic.Decide(rules, idle, out hit);
         Check("无关时刻返回 None", idleKind == ShutdownScheduleLogic.ActionKind.None,
             $"得到 {idleKind}");
+    }
+
+    /// <summary>
+    /// 承诺时刻机制：正常路径下，22:55 弹提醒时承诺的应当是准点 23:00，
+    /// 而 23:00 那一刻必须命中关机。
+    ///
+    /// 【为什么必须测】这是"不弹二次确认框"能成立的前提——
+    /// 删掉二次确认后，唯一把关机触发出去的就是这条承诺链。
+    /// 如果 22:55 承诺的不是 23:00，或 23:00 不认这个承诺，关机就再也不会发生。
+    /// </summary>
+    private static void TestShutdownPromiseNormalPath()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 0, DayOfWeek.Monday)
+        };
+
+        DateTime warnMoment = new DateTime(2026, 10, 12, 22, 55, 0);
+
+        ShutdownService.ResetRuntimeState();
+
+        // 22:55 这一刻巡检：正常路径下承诺时刻应当恰好等于准点 23:00。
+        // 同样从 Poll 返回值读，不自己重算。
+        var warn = ShutdownService.Poll(rules, warnMoment);
+
+        Check("22:55 命中提醒",
+            warn.ShouldWarn, warn.ShouldWarn ? "" : "未命中提醒");
+
+        Check("22:55 弹提醒时承诺的时刻是准点 23:00（正常路径不顺延）",
+            warn.DueAt == new DateTime(2026, 10, 12, 23, 0, 0),
+            $"得到 {warn.DueAt:yyyy-MM-dd HH:mm}");
+
+        // 在 23:00 那一刻，承诺应当命中
+        ShutdownService.MarkWarned(warnMoment);
+        ShutdownService.PromiseShutdown(warn.DueAt);
+        var r = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 0, 0));
+        Check("23:00 命中关机（承诺已生效）",
+            r.ShouldShutdown, r.ShouldShutdown ? "" : "未命中关机");
+        Check("23:00 不再弹提醒",
+            !r.ShouldWarn, r.ShouldWarn ? "错误地弹了提醒" : "");
+
+        ShutdownService.ResetRuntimeState();
+    }
+
+    /// <summary>
+    /// 重启补弹：22:56 重启后（提醒状态已丢），在 22:56 这一刻应当
+    /// **重新命中提醒**，且承诺时刻**顺延为 23:01**（现在 + 5 分钟）。
+    ///
+    /// 【为什么这是本轮最关键的一条】
+    /// 用户明确要求：22:56 重启时应重新弹框、重新计时、仍可选"本次不关机"。
+    /// 同时原规则的 23:00 必须被顶替掉——否则 23:00 与 23:01 会各关一次。
+    /// 本测试同时钉住这两面。
+    /// </summary>
+    private static void TestShutdownPromiseAfterRestart()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 0, DayOfWeek.Monday)
+        };
+
+        DateTime restartMoment = new DateTime(2026, 10, 12, 22, 56, 0);
+
+        // 重启：所有内存记账归零（这正是重启丢状态的效果）
+        ShutdownService.ResetRuntimeState();
+
+        // 22:56 这一刻巡检，应当**直接产出提醒**，且 DueAt 就是顺延后的承诺时刻。
+        // 【关键】必须从 Poll 的返回值读承诺时刻，不能自己重算一遍——
+        // 自己重算等于把产品逻辑抄进测试，产品改了测试也不会红。
+        var atRestart = ShutdownService.Poll(rules, restartMoment);
+
+        Check("22:56（重启后）应当命中提醒",
+            atRestart.ShouldWarn,
+            atRestart.ShouldWarn ? "" : "未命中提醒 → 重启后用户收不到提示");
+
+        Check("22:56 补弹时承诺时刻顺延为 23:01（重新计时，非准点 23:00）",
+            atRestart.DueAt == new DateTime(2026, 10, 12, 23, 1, 0),
+            $"得到 {atRestart.DueAt:yyyy-MM-dd HH:mm}");
+
+        // 模拟窗体弹框：把承诺时刻写入（这是窗体的职责）
+        ShutdownService.MarkWarned(restartMoment);
+        ShutdownService.PromiseShutdown(atRestart.DueAt);
+
+        // 关键：原规则的 23:00 必须**不**触发关机（被顺延承诺顶替）
+        var atOriginal = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 0, 0));
+        Check("原规则时刻 23:00 不再关机（已被顺延顶替，避免关两次）",
+            !atOriginal.ShouldShutdown,
+            atOriginal.ShouldShutdown ? "23:00 仍然触发了关机 → 会关两次" : "");
+
+        // 顺延后的 23:01 才关门
+        var atDelayed = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 1, 0));
+        Check("顺延时刻 23:01 命中关机",
+            atDelayed.ShouldShutdown,
+            atDelayed.ShouldShutdown ? "" : "23:01 未命中关机 → 会漏关");
+
+        ShutdownService.ResetRuntimeState();
+    }
+
+    /// <summary>
+    /// 重启补弹后选"本次不关机"，则顺延的那次也不得执行。
+    /// </summary>
+    private static void TestShutdownPromiseSkipDelayed()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 0, DayOfWeek.Monday)
+        };
+
+        DateTime delayed = new DateTime(2026, 10, 12, 23, 1, 0);
+
+        ShutdownService.ResetRuntimeState();
+        ShutdownService.PromiseShutdown(delayed);
+        ShutdownService.SkipOnce(delayed);
+
+        var r = ShutdownService.Poll(rules, delayed);
+        Check("顺延时刻选了「本次不关机」后不执行关机",
+            !r.ShouldShutdown, r.ShouldShutdown ? "仍然关机了" : "");
+
+        ShutdownService.ResetRuntimeState();
+    }
+
+    /// <summary>
+    /// 没有承诺时不关机：仅仅"到点是某个规则的时刻"不足以触发。
+    ///
+    /// 【为什么】这是行为变更的核心——旧版每轮从规则实时推导，
+    /// 只要时刻对上就关。新版改由"承诺时刻"驱动，没有承诺就不该动作。
+    /// 若不测这条，将来有人把判定改回"实时推导"也不会有测试报警，
+    /// 而那个改法会让重启后 23:00 与 23:01 各关一次。
+    /// </summary>
+    private static void TestShutdownNoPromiseNoShutdown()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 0, DayOfWeek.Monday)
+        };
+
+        ShutdownService.ResetRuntimeState();   // 清空承诺
+
+        var r = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 0, 0));
+        Check("无承诺时，即使到点也不关机",
+            !r.ShouldShutdown, r.ShouldShutdown ? "无承诺却关机了" : "");
+
+        ShutdownService.ResetRuntimeState();
     }
 
     /// <summary>

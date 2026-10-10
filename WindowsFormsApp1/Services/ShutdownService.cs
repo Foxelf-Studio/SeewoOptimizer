@@ -58,6 +58,22 @@ namespace SeewoOpt.Services
         private static DateTime _skipUntil = DateTime.MinValue;
 
         /// <summary>
+        /// 本轮已经"承诺"给用户的那次关机时刻——提醒框一弹出来就定下，
+        /// 到点据此执行。DateTime.MinValue 表示当前没有承诺。
+        ///
+        /// 【为什么需要它，而不是每轮从规则重新推导】
+        /// 正常路径下，"承诺时刻"与规则时刻一致（规则 23:00，22:55 弹提醒时
+        /// 承诺的也是 23:00），这时确实不必额外记。但重启后补弹提醒会顺延：
+        /// 22:56 重启、在 22:56~22:59 之间补弹，承诺的是"现在 + 5 分钟"
+        /// （如 23:01），而规则时刻仍是 23:00。两条路径必须只关一次，
+        /// 就得有个明确的"本轮到底承诺了哪一刻"作为唯一判据——
+        /// 否则 23:00（规则）与 23:01（顺延）会各关一次。
+        ///
+        /// 由调用方在弹提醒时通过 <see cref="PromiseShutdown"/> 写入。
+        /// </summary>
+        private static DateTime _promisedAt = DateTime.MinValue;
+
+        /// <summary>
         /// 结果：本轮巡检该做什么。
         /// </summary>
         public class PollResult
@@ -92,24 +108,38 @@ namespace SeewoOpt.Services
             DateTime thisMinute = new DateTime(now.Year, now.Month, now.Day,
                                                now.Hour, now.Minute, 0, now.Kind);
 
-            // ---- 先看是否该关机 ----
+            // ---- 第一优先：已承诺的那次关机到点了 ----
             //
-            // 用户在本轮的"5 分钟提醒"里选了"本次不关机"，则该次关机作废。
-            // 判断放在这里而不是直接删规则：规则是长期设置，
-            // "本次不关机"只对这一次生效，明天同一时间仍然要关。
-            if (_lastShutdownMinute != thisMinute && _skipUntil != thisMinute)
+            // 这是本服务的主路径：提醒框弹出时就把"承诺时刻"定下来了
+            // （由窗体调 PromiseShutdown 写入），此后每轮巡检只做一件事——
+            // 看当前分钟是否等于承诺时刻。相等就关机。
+            //
+            // 【为什么不再从规则实时推导】
+            // 因为重启后补弹提醒会顺延（22:56 补弹 → 承诺 23:01），
+            // 而规则时刻还是 23:00。若仍按规则推导，23:00 会先关一次，
+            // 23:01 又因承诺再关一次。用"承诺时刻"作唯一判据，
+            // 23:00 那一刻 _promisedAt 指向的是 23:01，自然不命中，只关一次。
+            if (_promisedAt != DateTime.MinValue
+                && _promisedAt == thisMinute
+                && _lastShutdownMinute != thisMinute
+                && _skipUntil != thisMinute)
             {
-                ShutdownTimeRule due = ShutdownScheduleLogic.FindDueRule(rules, now);
-                if (due != null)
-                {
-                    result.ShouldShutdown = true;
-                    result.Rule = due;
-                    result.DueAt = thisMinute;
-                    return result;
-                }
+                result.ShouldShutdown = true;
+                result.Rule = FindRuleForMoment(rules, thisMinute);
+                result.DueAt = thisMinute;
+                return result;
             }
 
-            // ---- 再看是否该提醒 ----
+            // ---- 第二优先：该弹"5 分钟后关机"提醒了吗 ----
+            //
+            // 两种情况会走到这里：
+            //   a) 正常路径：规则 23:00，22:55 命中提醒窗口 → 承诺 23:00
+            //   b) 重启补弹：22:56 重启后 _lastWarnedMinute 归零，
+            //      此刻仍在 22:55~22:59 的提醒窗口内 → 重新弹，
+            //      并把承诺时刻顺延为"现在 + 5 分钟"
+            //
+            // 注意 b) 的判据：只要"某条规则的下一次触发时刻"距现在 ≤ 提前量，
+            // 就算还在窗口内。这样 22:56 重启也能补弹，而不局限于 22:55 整。
             if (_lastWarnedMinute != thisMinute)
             {
                 ShutdownTimeRule warnRule = ShutdownScheduleLogic.FindRuleToWarn(rules, now);
@@ -118,17 +148,50 @@ namespace SeewoOpt.Services
                     DateTime? next = ShutdownScheduleLogic.NextOccurrence(
                         warnRule, thisMinute.AddMinutes(-1));
 
-                    // next 只可能为 null 当规则掩码为空，届时不必提醒
                     if (next.HasValue && _skipUntil != next.Value)
                     {
+                        // 承诺时刻 = 从现在起算满提前量。
+                        // 正常情况（22:55 弹）它恰好等于 next（23:00）；
+                        // 重启补弹（22:56 弹）则顺延到 23:01。
+                        DateTime promised = thisMinute
+                            .AddMinutes(ShutdownScheduleLogic.WarnMinutesAhead);
+                        if (promised < next.Value) promised = next.Value;
+
                         result.ShouldWarn = true;
                         result.Rule = warnRule;
-                        result.DueAt = next.Value;
+                        result.DueAt = promised;
                     }
                 }
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// 从规则里找出"目标时刻对应哪条规则"，仅用于把规则写进提示文案。
+        /// 找不到时返回 null（例如重启补弹后承诺时刻已顺延、不再等于规则时刻），
+        /// 调用方需容忍 null。
+        /// </summary>
+        private static ShutdownTimeRule FindRuleForMoment(
+            IEnumerable<ShutdownTimeRule> rules, DateTime moment)
+        {
+            if (rules == null) return null;
+            foreach (ShutdownTimeRule rule in rules)
+            {
+                if (rule != null && rule.Matches(moment)) return rule;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 记账：把"承诺时刻"定下来。窗体的提醒框一弹出就调用，
+        /// 此后 Poll 只认这个时刻。
+        /// </summary>
+        public static void PromiseShutdown(DateTime at)
+        {
+            _promisedAt = new DateTime(at.Year, at.Month, at.Day,
+                                       at.Hour, at.Minute, 0, at.Kind);
+            LogService.Write($"已承诺关机时刻：{_promisedAt:yyyy-MM-dd HH:mm}");
         }
 
         /// <summary>记账：本分钟已提醒过</summary>
@@ -218,6 +281,13 @@ namespace SeewoOpt.Services
             _lastWarnedMinute = DateTime.MinValue;
             _lastShutdownMinute = DateTime.MinValue;
             _skipUntil = DateTime.MinValue;
+            _promisedAt = DateTime.MinValue;
         }
+
+        /// <summary>
+        /// 只读快照，供单元测试断言内部状态。
+        /// 生产代码不应依赖它——它是为测试留的观察窗。
+        /// </summary>
+        internal static DateTime PromisedAtSnapshot { get { return _promisedAt; } }
     }
 }

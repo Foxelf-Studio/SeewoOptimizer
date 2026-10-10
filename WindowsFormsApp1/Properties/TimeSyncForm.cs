@@ -795,7 +795,14 @@ namespace SeewoOpt
             // 即使用户把它晾着，同一分钟内也不会再弹第二个）
             ShutdownService.MarkWarned(now);
 
-            WriteLog($"触发关机提醒：规则 {result.Rule.Describe()}，预定于 {result.DueAt:HH:mm} 关机");
+            // 把"承诺时刻"定下来。此后 Poll 只认这个时刻——
+            // 正常情况它就是规则时刻（23:00），重启补弹时会顺延（如 23:01）。
+            // 必须在弹框**之前**写入：万一用户在框还没渲染时程序被打断，
+            // 承诺时刻已经生效，不会出现"提醒了却没承诺"的空窗。
+            ShutdownService.PromiseShutdown(result.DueAt);
+
+            WriteLog($"触发关机提醒：规则 {result.Rule.Describe()}，"
+                   + $"预定于 {result.DueAt:HH:mm} 关机");
 
             DialogResult choice = MessageBox.Show(
                 string.Format(
@@ -812,7 +819,9 @@ namespace SeewoOpt
 
             if (choice == DialogResult.Yes)
             {
-                WriteLog("用户在提醒中选择\"确认\"");
+                // 用户点了"确认"：承诺时刻已在弹框前写入，这里什么都不用做——
+                // 到点由 PollShutdown 直接执行，不再二次弹框。
+                WriteLog("用户在提醒中选择\"确认\"，到点将直接关机");
             }
             else
             {
@@ -827,37 +836,38 @@ namespace SeewoOpt
         }
 
         /// <summary>
-        /// 到点执行关机。这里再问一次，避免"提醒时确认了、之后人又回来了"
-        /// 这种场景被直接关机。
+        /// 到点执行关机。
+        ///
+        /// 【这里不再弹确认框】
+        /// 提醒框（提前量 5 分钟）本身就是最后一道确认——用户不点"本次不关机"
+        /// 就等于默许。到点再问一次会让"配了 23:00 却要点两次才关"变成常态，
+        /// 而且无人值守的教室一体机上，那个框会一直挂着，关机永远不执行。
+        /// 真正需要撤销时，shutdown /s /t 300 给的 5 分钟系统倒计时
+        /// 和 `shutdown /a` 已经足够。
+        ///
+        /// result.Rule 在"重启补弹后顺延"的情形下可能为 null
+        /// （承诺时刻已不等于任何规则时刻），文案需容忍。
         /// </summary>
         private void HandleShutdownExecution(ShutdownService.PollResult result, DateTime now)
         {
             ShutdownService.MarkShutdown(now);
 
-            WriteLog($"到达关机时间点：{result.Rule.Describe()}");
-
-            DialogResult choice = MessageBox.Show(
-                string.Format(
-                    "已到预定关机时间（{0}）。\n\n" +
-                    "点击「确认」后电脑将在 {1} 分钟内关机，\n" +
-                    "期间可随时执行 shutdown /a 取消。",
-                    result.Rule.Describe(), ShutdownService.SystemCountdownSeconds / 60),
-                "立即关机",
-                MessageBoxButtons.OKCancel,
-                MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2);
-
-            if (choice != DialogResult.OK)
-            {
-                ShutdownService.SkipOnce(result.DueAt);
-                WriteLog("用户在关机确认中选择取消，本次不关机");
-                return;
-            }
+            string label = result.Rule != null
+                ? result.Rule.Describe()
+                : $"{result.DueAt:HH:mm}";
+            WriteLog($"到达关机时间点：{label}，执行关机");
 
             string error;
             if (ShutdownService.ExecuteShutdown(out error))
             {
-                AddLog($"\n× 已下达关机命令（{ShutdownService.SystemCountdownSeconds / 60} 分钟后关机）\n", Color.DarkRed);
+                AddLog($"\n× 已下达关机命令（{ShutdownService.SystemCountdownSeconds / 60} 分钟后关机）\n",
+                       Color.DarkRed);
+                if (trayIcon != null)
+                {
+                    trayIcon.ShowBalloonTip(3000, "即将关机",
+                        $"电脑将在 {ShutdownService.SystemCountdownSeconds / 60} 分钟后关机，"
+                      + "可用 shutdown /a 取消。", ToolTipIcon.Warning);
+                }
             }
             else
             {
