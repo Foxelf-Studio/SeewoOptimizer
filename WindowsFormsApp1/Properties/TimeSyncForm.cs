@@ -330,16 +330,15 @@ namespace SeewoOpt
         private void SetupForm()
         {
             this.Text = "川中计算机协会 - 陈叔叔系统优化工具";
-            // 【窗口尺寸】高 300（原 800x600 的下一半），宽 1200（原 800 的 1.5 倍）。
+            // 【窗口尺寸】900 x 600。
             //
-            // 高度减半：上一个版本整屏都是日志，而用户真正想一眼看到的是
-            // "这个工具已经在守着这台电脑多少天"。上半屏留给守护天数，
-            // 日志压到下半屏，窗口整体矮下来，不挡教室大屏上的课件。
+            // 这是最初的 800x600 略加宽后的尺寸。中间经历过一次"高度减半到
+            // 300"的尝试（想让窗口不挡教室大屏），但 300 高把日志区压得只剩
+            // 三四行，翻日志要一直滚；而 900 宽配上 600 高，日志区才有足够
+            // 纵向空间。
             //
-            // 宽度 1.5 倍：800 宽配 300 高显得是一条细长横条，横向拥挤
-            // 而纵向空旷。加宽后日志区每行能放下更多字（少折行、少滚动），
-            // 底部六个按钮的间距也不再局促。
-            this.Size = new Size(1200, 300);
+            // 上半屏仍留给"已守护本电脑 x 天"这句主信息，日志在下半屏。
+            this.Size = new Size(900, 600);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedSingle;
             this.MaximizeBox = false;
@@ -392,11 +391,14 @@ namespace SeewoOpt
                 BackColor = Color.Transparent
             };
 
-            // 上半屏容器：占窗口一半高度，把 guardLabel 撑满并居中
+            // 上半屏容器：高度约窗口的 1/4，把 guardLabel 撑满并居中。
+            //
+            // 118 这个值是配 300 高窗口时的（约占 40%）。窗口改回 600 高后
+            // 若仍用 118，这块会缩成一条窄带、显得局促，故按比例放大到 170。
             Panel guardPanel = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 118,
+                Height = 170,
                 BackColor = Color.FromArgb(245, 250, 255)
             };
             guardPanel.Controls.Add(guardLabel);
