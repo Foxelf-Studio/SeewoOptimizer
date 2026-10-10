@@ -299,6 +299,74 @@ namespace SeewoOpt.Services
         }
 
         /// <summary>
+        /// 解析 shutdown.exe 的**绝对路径**。
+        ///
+        /// 【为什么绝不能用裸文件名 "shutdown.exe"】
+        /// 实机截图报过：执行关机时弹出
+        /// `shutdown.exe - 应用程序错误 / 应用程序无法正常启动(0xc0000142)`。
+        ///
+        /// 0xc0000142 是 STATUS_DLL_INIT_FAILED——**进程自己没起来**，
+        /// 不是"关机被某个程序挡住了"（那种是另一个框）。
+        /// 根因就是裸文件名：
+        ///   · 裸名走的是 CreateProcess 的搜索顺序——先当前目录，
+        ///     再 PATH。教室机器上 PATH 常被各种工具塞进奇怪条目，
+        ///     只要有一个目录里有同名/损坏的 shutdown.exe，就先被找到，
+        ///     那个副本的 DLL 依赖解析不了，于是 0xc0000142。
+        ///   · 本程序由计划任务自启，工作目录可能是网络盘或受限目录，
+        ///     子进程继承后会进一步影响它的 DLL 搜索。
+        ///
+        /// 解法：直接用 %SystemRoot%\System32\shutdown.exe 的绝对路径，
+        /// 绕开一切搜索顺序。
+        ///
+        /// 【为什么要看 Sysnative】
+        /// 若本程序以 32 位进程运行在 64 位系统上，文件系统重定向会把
+        /// System32 映射到 SysWOW64——那里**没有** shutdown.exe。
+        /// 此时正解是 Sysnative（32 位视角通往真实 System32 的别名）。
+        /// 本程序当前是 AnyCPU、在 64 位系统上跑 64 位进程，走不到这一步；
+        /// 但保留这个分支，是为了将来若改成 x86 目标不会突然失效。
+        /// </summary>
+        internal static string ResolveShutdownExe()
+        {
+            string system32 = Environment.GetFolderPath(
+                Environment.SpecialFolder.System);
+            string primary = System.IO.Path.Combine(system32, "shutdown.exe");
+            if (System.IO.File.Exists(primary)) return primary;
+
+            // 32 位进程在 64 位系统上的回退：Sysnative 指向真实的 System32
+            string sysnative = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                "Sysnative", "shutdown.exe");
+            if (System.IO.File.Exists(sysnative)) return sysnative;
+
+            // 都找不到时退回绝对路径的 primary——交给 Process.Start 报错，
+            // 我们照常把异常记进日志，不静默吞掉。
+            return primary;
+        }
+
+        /// <summary>
+        /// 构造 shutdown.exe 的启动参数。
+        ///
+        /// 两处调用共用，保证"绝对路径 + 固定工作目录"这两条纪律
+        /// 不会只落实在一处、另一处又退回裸名。
+        /// </summary>
+        internal static System.Diagnostics.ProcessStartInfo BuildShutdownStartInfo(string arguments)
+        {
+            string exe = ResolveShutdownExe();
+            return new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = exe,
+                Arguments = arguments,
+                // 显式把工作目录钉在 System32：
+                //   1. 不继承本程序可能异常的工作目录（见 ResolveShutdownExe）；
+                //   2. 让子进程的隐含 DLL 搜索起点落在一个确定且可访问的位置。
+                WorkingDirectory = System.IO.Path.GetDirectoryName(exe),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
+            };
+        }
+
+        /// <summary>
         /// 下发关机命令。
         ///
         /// 用 shutdown.exe 而不是 P/Invoke ExitWindowsEx：
@@ -318,21 +386,15 @@ namespace SeewoOpt.Services
             error = null;
             try
             {
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "shutdown.exe",
-                    // 不带 /c 注释：/t 0 时系统不会弹"将要关机"的提示框
-                    // （那条提示只在有倒计时时出现），带注释也无处显示。
-                    Arguments = string.Format("/s /t {0}", SystemCountdownSeconds),
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
-                };
+                // 不带 /c 注释：/t 0 时系统不会弹"将要关机"的提示框
+                // （那条提示只在有倒计时时出现），带注释也无处显示。
+                var psi = BuildShutdownStartInfo(
+                    string.Format("/s /t {0}", SystemCountdownSeconds));
 
                 System.Diagnostics.Process.Start(psi);
                 LogService.Write(SystemCountdownSeconds > 0
-                    ? $"已下发关机命令，系统倒计时 {SystemCountdownSeconds} 秒"
-                    : "已下发关机命令，立即执行（系统倒计时 0 秒）");
+                    ? $"已下发关机命令（{psi.FileName}），系统倒计时 {SystemCountdownSeconds} 秒"
+                    : $"已下发关机命令（{psi.FileName}），立即执行（系统倒计时 0 秒）");
                 return true;
             }
             catch (Exception ex)
@@ -365,14 +427,11 @@ namespace SeewoOpt.Services
             error = null;
             try
             {
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "shutdown.exe",
-                    Arguments = "/a",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
-                };
+                // 与 ExecuteShutdown 共用同一个构建方法：
+                // 撤销同样必须走绝对路径，否则可能出现
+                // "关机用的是真的 shutdown.exe、撤销却调到了别的副本"——
+                // 那种半对半错最难排查。
+                var psi = BuildShutdownStartInfo("/a");
 
                 using (var p = System.Diagnostics.Process.Start(psi))
                 {

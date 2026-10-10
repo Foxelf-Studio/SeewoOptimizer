@@ -62,6 +62,7 @@ internal static class NtpClientTests
         TestShutdownNextOccurrence();
         TestShutdownWarnWindow();
         TestShutdownCountdownIsImmediate();
+        TestShutdownUsesAbsolutePath();
         TestShutdownDecidePriority();
         TestShutdownPromiseNormalPath();
         TestShutdownPromiseAfterRestart();
@@ -1144,6 +1145,54 @@ internal static class NtpClientTests
         Check($"提醒提前量仍为 5 分钟（唯一确认窗口，实际 {ShutdownScheduleLogic.WarnMinutesAhead}）",
             ShutdownScheduleLogic.WarnMinutesAhead == 5,
             $"得到 {ShutdownScheduleLogic.WarnMinutesAhead}");
+    }
+
+    /// <summary>
+    /// 关机命令必须用 shutdown.exe 的**绝对路径**启动，且工作目录被钉死。
+    ///
+    /// 【为什么单独钉这一条——实机报错 0xc0000142 的直接对策】
+    /// 实机截图出现 `shutdown.exe - 应用程序错误 / 应用程序无法正常启动(0xc0000142)`。
+    /// 0xc0000142 是 STATUS_DLL_INIT_FAILED，含义是**进程自己没起来**，
+    /// 而非"关机被程序挡住"。
+    ///
+    /// 根因是裸文件名 "shutdown.exe" 走 CreateProcess 的搜索顺序
+    /// （当前目录 → PATH）。教室机器 PATH 常被工具塞进奇怪条目，
+    /// 一旦有同名/损坏副本先被命中，就会 0xc0000142。
+    ///
+    /// 修法是改用 %SystemRoot%\System32\shutdown.exe 绝对路径，
+    /// 并显式设置 WorkingDirectory，不继承本程序可能异常的工作目录。
+    ///
+    /// 本测试若变红（比如有人改回裸名），说明上述回归被重新引入。
+    /// </summary>
+    private static void TestShutdownUsesAbsolutePath()
+    {
+        string exe = ShutdownService.ResolveShutdownExe();
+
+        // 1. 必须是绝对路径，不能是裸名
+        Check($"shutdown.exe 使用绝对路径（实际 {exe}）",
+            !string.IsNullOrEmpty(exe) && System.IO.Path.IsPathRooted(exe),
+            "裸文件名会走 PATH/当前目录搜索，是 0xc0000142 的根源");
+
+        // 2. 扩展名必须是 shutdown.exe（大小写不敏感）
+        Check($"路径末端是 shutdown.exe（实际 {System.IO.Path.GetFileName(exe)}）",
+            string.Equals(System.IO.Path.GetFileName(exe), "shutdown.exe",
+                StringComparison.OrdinalIgnoreCase));
+
+        // 3. 该路径在当前机器上确实存在（若为 Sysnative 回退也算）
+        Check($"解析出的 shutdown.exe 存在（{exe}）",
+            System.IO.File.Exists(exe));
+
+        // 4. 通过 BuildShutdownStartInfo 产出的对象同样满足以上契约，
+        //    且工作目录非空——确保两处调用不会各自退化
+        var psi = ShutdownService.BuildShutdownStartInfo("/a");
+        Check("BuildShutdownStartInfo 用绝对路径",
+            System.IO.Path.IsPathRooted(psi.FileName));
+        Check("BuildShutdownStartInfo 钉死了工作目录",
+            !string.IsNullOrEmpty(psi.WorkingDirectory)
+            && System.IO.Path.IsPathRooted(psi.WorkingDirectory));
+        Check("BuildShutdownStartInfo 参数原样透传",
+            psi.Arguments == "/a",
+            $"得到 {psi.Arguments}");
     }
 
     /// <summary>
