@@ -23,14 +23,26 @@ namespace SeewoOpt.Services
         /// <summary>
         /// 关机前的系统级倒计时秒数。
         ///
-        /// 【为什么不直接 shutdown /t 0 立即关】
-        /// 留这段时间有两个用处：
-        ///   1. 用户误点"确认"后还能用 `shutdown /a` 撤销；
-        ///   2. Windows 会走正常的"请保存你的工作"流程，
-        ///      不会硬切掉未保存的文档——教室一体机上很可能正开着课件。
-        /// 与提醒弹窗的提前量（5 分钟）是两回事，不要混淆。
+        /// 【为什么是 0——这是用户明确要求的行为变更，与早先设计相反】
+        /// 早先取 300（5 分钟），理由是"留一点撤销窗口，且 Windows 会走
+        /// 正常的'请保存工作'流程，不会硬切掉课件"。
+        ///
+        /// 实机截图暴露了那个设计的真实代价：300 秒倒计时**结束后**
+        /// Windows 会自己弹出"您将要被注销"的系统框，与我们自己的提醒框
+        /// 叠在一起（截图里三个框同屏），用户点哪个都不对；
+        /// 而且那 5 分钟里用户的撤销**只能靠命令行 shutdown /a**——
+        /// 教室一体机上没人会去敲命令行。
+        ///
+        /// 用户的最终判断是：**提前 5 分钟的提醒框就是唯一的确认窗口**。
+        /// 框里问过了，用户要么点"本次不关机"（那时命令还没下发，
+        /// 直接跳过即可），要么不点/点"确认"（到点就该干脆地关掉）。
+        /// 到点之后再留一段系统倒计时，只是把决定权从我们的框
+        /// 转移到一个用户看不懂的系统框里，纯属多余且制造混乱。
+        ///
+        /// 因此改为 0：到点立即执行，不再有二次系统倒计时。
+        /// 与提醒弹窗的提前量（5 分钟）仍然是两回事，不要混淆。
         /// </summary>
-        public const int SystemCountdownSeconds = 300;
+        public const int SystemCountdownSeconds = 0;
 
         /// <summary>
         /// 巡检间隔（毫秒）。
@@ -254,22 +266,52 @@ namespace SeewoOpt.Services
         }
 
         /// <summary>
-        /// 用户选择了"本次不关机"：把这一次的关机时刻记下来，本次不再触发。
+        /// 用户选择了"本次不关机"：把这一次的关机时刻记下来，本次不再触发，
+        /// 并**顺手撤销任何已经下发的系统关机倒计时**。
         /// 下一天（或下一个命中日）的同一时间仍会正常提醒与执行。
+        ///
+        /// 【为什么要在这里调 AbortShutdown——这是个真实存在的洞】
+        /// 早先 SkipOnce 只写一个内存标记，假设"取消发生在关机命令下发之前"。
+        /// 但实机截图里出现过这一幕：日志区显示"已下达关机命令"，
+        /// 同时系统的"您将要被注销"框已经弹出来——说明关机命令已经发出，
+        /// 此时只改内存标记，**系统那边的倒计时照样会走完并关机**。
+        /// 用户以为点了"本次不关机"就没事了，结果电脑还是关了。
+        ///
+        /// 现在把它做成"记账 + 撤销"的原子动作：只要用户选了不关机，
+        /// 就尽最大努力让系统那边真的停下来。
+        /// 在 /t 0 的设计下通常已无可撤之物（shutdown /a 返回非 0），
+        /// 那属于"本来就没有进行中的关机"，正是我们想要的结果；
+        /// 真遇到残留倒计时时，这一步才是唯一能救命的地方。
         /// </summary>
         public static void SkipOnce(DateTime dueAt)
         {
             _skipUntil = new DateTime(dueAt.Year, dueAt.Month, dueAt.Day,
                                       dueAt.Hour, dueAt.Minute, 0, dueAt.Kind);
             LogService.Write($"用户选择本次不关机，跳过 {_skipUntil:yyyy-MM-dd HH:mm} 这一次");
+
+            // 撤销可能已经下发的关机命令（无进行中任务时静默通过）。
+            // 失败不阻断流程——标记已写入，至少保证本程序不会再补一刀。
+            string abortError;
+            if (AbortShutdown(out abortError))
+                LogService.Write("已确认系统侧无进行中的关机任务");
+            else
+                LogService.Write($"尝试撤销系统关机失败：{abortError}（本次跳过标记已生效）");
         }
 
         /// <summary>
         /// 下发关机命令。
         ///
         /// 用 shutdown.exe 而不是 P/Invoke ExitWindowsEx：
-        /// 前者带系统级的倒计时与"请保存工作"流程，用户还能用 shutdown /a 撤销；
-        /// 后者是硬关机，会直接切掉未保存的文档。
+        /// 后者是硬关机、不走系统的"请保存工作"流程，会直接切掉未保存的文档。
+        /// shutdown.exe 即使 /t 0 也会走正常的会话结束流程与关机提示。
+        ///
+        /// 【/t 0 的含义与代价，务必看清】
+        /// 倒计时为 0 表示**立即执行**，没有可撤销的窗口：
+        /// 命令一下发，系统就开始关会话、结束进程，`shutdown /a` 此时
+        /// 已经救不回来了（没有"进行中的关机"可中止）。
+        ///
+        /// 这正是用户要的行为——**提前 5 分钟的提醒框就是唯一的确认窗口**。
+        /// 因此不要在调用本方法之后还指望能撤销，见 <see cref="AbortShutdown"/> 的注释。
         /// </summary>
         public static bool ExecuteShutdown(out string error)
         {
@@ -279,16 +321,18 @@ namespace SeewoOpt.Services
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = "shutdown.exe",
-                    Arguments = string.Format(
-                        "/s /t {0} /c \"陈叔叔希沃优化助手：到预定时间，电脑将在 {1} 分钟内关机。若要取消，请在命令行执行 shutdown /a\"",
-                        SystemCountdownSeconds, SystemCountdownSeconds / 60),
+                    // 不带 /c 注释：/t 0 时系统不会弹"将要关机"的提示框
+                    // （那条提示只在有倒计时时出现），带注释也无处显示。
+                    Arguments = string.Format("/s /t {0}", SystemCountdownSeconds),
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
                 };
 
                 System.Diagnostics.Process.Start(psi);
-                LogService.Write($"已下发关机命令，系统倒计时 {SystemCountdownSeconds} 秒");
+                LogService.Write(SystemCountdownSeconds > 0
+                    ? $"已下发关机命令，系统倒计时 {SystemCountdownSeconds} 秒"
+                    : "已下发关机命令，立即执行（系统倒计时 0 秒）");
                 return true;
             }
             catch (Exception ex)
@@ -299,24 +343,69 @@ namespace SeewoOpt.Services
             }
         }
 
-        /// <summary>撤销已下发的关机（用于"确认"之后又反悔的场景）</summary>
-        public static void AbortShutdown()
+        /// <summary>
+        /// 撤销已下发的关机倒计时。
+        ///
+        /// 【什么时候它真的能撤销，什么时候不能——别误解】
+        /// 只有"系统手头有一个正在倒计时的关机任务"时，`shutdown /a` 才有意义。
+        /// 在当前设计下（<see cref="SystemCountdownSeconds"/> = 0），
+        /// 关机命令一下发就立即执行，**几乎没有可撤销的窗口**。
+        ///
+        /// 那这个方法还有什么用？——两处真实用途：
+        ///   1. 防御性撤销：万一将来把倒计时改回非 0（或系统策略强制加缓冲），
+        ///      "本次不关机"必须仍能真正拦住关机，而不是只改一个内存标记；
+        ///   2. 清理历史残留：上一次运行若在倒计时中途被杀进程，
+        ///      系统里可能还挂着一个待执行的关机任务，开机后应能清掉。
+        ///
+        /// 调用它是安全的：没有进行中的关机时，shutdown.exe 返回非 0
+        /// 且不产生任何副作用，我们只是静默记一条日志。
+        /// </summary>
+        public static bool AbortShutdown(out string error)
         {
+            error = null;
             try
             {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                var psi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = "shutdown.exe",
                     Arguments = "/a",
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
-                });
-                LogService.Write("已撤销系统关机倒计时");
+                };
+
+                using (var p = System.Diagnostics.Process.Start(psi))
+                {
+                    // 【为什么要等它退出并读 ExitCode】
+                    // shutdown /a 在没有进行中的关机时返回非 0（通常 1116）。
+                    // 不等它结束就直接报"撤销成功"是在骗人——
+                    // 必须拿到真实的退出码，才能判断到底撤掉没有。
+                    if (p != null && !p.WaitForExit(5000))
+                    {
+                        error = "撤销关机命令超时未返回";
+                        LogService.Write(error);
+                        return false;
+                    }
+
+                    int code = (p != null && p.HasExited) ? p.ExitCode : -1;
+                    if (code == 0)
+                    {
+                        LogService.Write("已撤销系统关机倒计时（系统确认成功）");
+                        return true;
+                    }
+
+                    // 非 0：多半是"当前没有进行中的关机"。这不是错误，
+                    // 只是说明没有东西可撤——对调用方而言结果一样（机器不会关）。
+                    LogService.Write($"撤销关机未生效（shutdown /a 退出码 {code}，"
+                                   + "通常表示当前没有进行中的关机）");
+                    return true;
+                }
             }
             catch (Exception ex)
             {
+                error = ex.Message;
                 LogService.Write($"撤销关机失败：{ex.Message}");
+                return false;
             }
         }
 

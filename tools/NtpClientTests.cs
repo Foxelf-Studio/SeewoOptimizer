@@ -61,6 +61,7 @@ internal static class NtpClientTests
         TestShutdownEmptyMaskNeverMatches();
         TestShutdownNextOccurrence();
         TestShutdownWarnWindow();
+        TestShutdownCountdownIsImmediate();
         TestShutdownDecidePriority();
         TestShutdownPromiseNormalPath();
         TestShutdownPromiseAfterRestart();
@@ -1115,6 +1116,34 @@ internal static class NtpClientTests
 
         Check("关机时刻本身：不触发提醒（该走关机分支）",
             ShutdownScheduleLogic.FindRuleToWarn(rules, shutdownAt) == null);
+    }
+
+    /// <summary>
+    /// 到点执行时**不再带系统倒计时**（该常量必须是 0）。
+    ///
+    /// 【为什么这条要单独钉住】这是用户明确要求的行为变更，而且方向
+    /// 与"直觉上的安全做法"相反——直觉会认为"留 5 分钟撤销窗口更安全"。
+    /// 实机证明恰恰相反：5 分钟倒计时结束后 Windows 会自己弹出
+    /// "您将要被注销"的系统框，与我们的提醒框叠在一起；而那 5 分钟里
+    /// 用户唯一的撤销手段是敲命令行 shutdown /a，教室一体机上没人会做。
+    ///
+    /// 该设计下"提前 5 分钟的提醒框"就是唯一的确认窗口：
+    /// 框里问过，用户不点"本次不关机"就到点直接关。
+    ///
+    /// 若将来有人把这个值改回 300，本测试会立刻变红，
+    /// 逼他重新面对上面这段权衡——而不是默默把系统框又引回来。
+    /// </summary>
+    private static void TestShutdownCountdownIsImmediate()
+    {
+        Check($"系统倒计时为 0（到点立即关机，实际 {ShutdownService.SystemCountdownSeconds}）",
+            ShutdownService.SystemCountdownSeconds == 0,
+            $"得到 {ShutdownService.SystemCountdownSeconds}——"
+          + "非 0 会引入系统自带的'您将要被注销'框，与提醒框叠加");
+
+        // 提醒提前量仍必须是 5 分钟：它是唯一的确认窗口，不能被改小成 0
+        Check($"提醒提前量仍为 5 分钟（唯一确认窗口，实际 {ShutdownScheduleLogic.WarnMinutesAhead}）",
+            ShutdownScheduleLogic.WarnMinutesAhead == 5,
+            $"得到 {ShutdownScheduleLogic.WarnMinutesAhead}");
     }
 
     /// <summary>

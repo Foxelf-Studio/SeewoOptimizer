@@ -861,8 +861,10 @@ namespace SeewoOpt
             }
             else
             {
+                // SkipOnce 内部会连带撤销任何已下发的系统关机倒计时
+                // （见其注释：只改内存标记挡不住已经发出去的关机命令）。
                 ShutdownService.SkipOnce(result.DueAt);
-                WriteLog("用户在提醒中选择\"本次不关机\"");
+                WriteLog("用户在提醒中选择\"本次不关机\"，已跳过本次并尝试撤销系统关机");
                 if (trayIcon != null)
                 {
                     trayIcon.ShowBalloonTip(3000, "已跳过本次关机",
@@ -874,12 +876,17 @@ namespace SeewoOpt
         /// <summary>
         /// 到点执行关机。
         ///
-        /// 【这里不再弹确认框】
-        /// 提醒框（提前量 5 分钟）本身就是最后一道确认——用户不点"本次不关机"
-        /// 就等于默许。到点再问一次会让"配了 23:00 却要点两次才关"变成常态，
+        /// 【这里不弹任何确认框——提醒框（提前 5 分钟）是唯一的确认窗口】
+        /// 用户没点"本次不关机"就等于默许，到点就干脆地关掉。
+        /// 到点再问一次会让"配了 23:00 却要点两次才关"变成常态，
         /// 而且无人值守的教室一体机上，那个框会一直挂着，关机永远不执行。
-        /// 真正需要撤销时，shutdown /s /t 300 给的 5 分钟系统倒计时
-        /// 和 `shutdown /a` 已经足够。
+        /// 真正需要撤销时，用户应该在提前 5 分钟的那个框里点"本次不关机"。
+        ///
+        /// 【为什么不再带系统倒计时】
+        /// 见 ShutdownService.SystemCountdownSeconds 的注释：
+        /// 5 分钟系统倒计时结束时会由 Windows 自己弹出"您将要被注销"的框，
+        /// 与我们的提醒框叠在一起，用户无所适从。
+        /// 现在改为 /t 0 立即执行，界面上只留我们自己的提示。
         ///
         /// result.Rule 在"重启补弹后顺延"的情形下可能为 null
         /// （承诺时刻已不等于任何规则时刻），文案需容忍。
@@ -896,13 +903,11 @@ namespace SeewoOpt
             string error;
             if (ShutdownService.ExecuteShutdown(out error))
             {
-                AddLog($"\n× 已下达关机命令（{ShutdownService.SystemCountdownSeconds / 60} 分钟后关机）\n",
-                       Color.DarkRed);
+                AddLog("\n× 已执行关机命令\n", Color.DarkRed);
                 if (trayIcon != null)
                 {
-                    trayIcon.ShowBalloonTip(3000, "即将关机",
-                        $"电脑将在 {ShutdownService.SystemCountdownSeconds / 60} 分钟后关机，"
-                      + "可用 shutdown /a 取消。", ToolTipIcon.Warning);
+                    trayIcon.ShowBalloonTip(3000, "正在关机",
+                        "已到达预定时间，电脑正在关机。", ToolTipIcon.Warning);
                 }
             }
             else

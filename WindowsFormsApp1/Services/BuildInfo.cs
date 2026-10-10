@@ -26,7 +26,7 @@ namespace SeewoOpt.Services
         /// 构建号。每次交付新 exe 手动递增，绝不与上一个交付物重复。
         /// 格式：yyyy.MM.dd-r序号
         /// </summary>
-        public const string BuildId = "2026.10.11-r12";
+        public const string BuildId = "2026.10.11-r13";
 
         private static string _cached;
 
