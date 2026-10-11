@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using Microsoft.Win32.TaskScheduler;
 
@@ -42,7 +42,7 @@ namespace SeewoOpt.Services
         /// <summary>登录后延迟多少秒启动</summary>
         private static readonly TimeSpan TriggerDelay = TimeSpan.FromSeconds(5);
 
-        private const string TaskDescription = "川中计算机协会 - 陈叔叔系统优化工具";
+        private const string TaskDescription = "川中计算机协会-陈叔叔希沃优化助手";
         private const string TaskAuthor = "TimeSyncTool";
 
         /// <summary>任务当前是否存在。查询失败时返回 false。</summary>

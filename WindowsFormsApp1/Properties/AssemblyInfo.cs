@@ -5,11 +5,11 @@ using System.Runtime.InteropServices;
 // 有关程序集的一般信息由以下
 // 控制。更改这些特性值可修改
 // 与程序集关联的信息。
-[assembly: AssemblyTitle("陈叔叔希沃系统优化工具")]
+[assembly: AssemblyTitle("陈叔叔希沃优化助手")]
 [assembly: AssemblyDescription("")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("Foxelf Studio")]
-[assembly: AssemblyProduct("陈叔叔希沃系统优化工具")]
+[assembly: AssemblyProduct("陈叔叔希沃优化助手")]
 [assembly: AssemblyCopyright("Copyright © 2026 Foxelf Studio")]
 [assembly: AssemblyTrademark("Foxelf Studio")]
 [assembly: AssemblyCulture("")]
@@ -29,5 +29,5 @@ using System.Runtime.InteropServices;
 //      生成号
 //      修订号
 //
-[assembly: AssemblyVersion("26.6.9")]
-[assembly: AssemblyFileVersion("26.6.9")]
+[assembly: AssemblyVersion("26.10.11")]
+[assembly: AssemblyFileVersion("26.10.11")]

@@ -329,7 +329,7 @@ namespace SeewoOpt
 
         private void SetupForm()
         {
-            this.Text = "川中计算机协会 - 陈叔叔系统优化工具";
+            this.Text = "川中计算机协会-陈叔叔希沃优化助手";
             // 【窗口尺寸】900 x 600。
             //
             // 这是最初的 800x600 略加宽后的尺寸。中间经历过一次"高度减半到
@@ -685,7 +685,7 @@ namespace SeewoOpt
                     WriteLog("未启用自动执行，等待用户点击\"开始执行\"");
                     UpdateStatus("已就绪，点击左下角\"开始执行\"", Color.FromArgb(30, 90, 160));
                     logTextBox.Clear();
-                    logTextBox.AppendText($"PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.{_versionString}\n");
+                    logTextBox.AppendText($"PEACE & LOVE 川中计算机协会 陈叔叔希沃优化助手 ver.{_versionString}\n");
                     logTextBox.AppendText(new string('-', 50) + "\n");
                     logTextBox.AppendText("陈叔叔已在此守候。\n");
                     logTextBox.AppendText("点击左下角「开始执行」按钮，即可开始音量调节、结束 WPS 进程与时间同步。\n");
@@ -1131,7 +1131,7 @@ namespace SeewoOpt
             trayIcon = new NotifyIcon
             {
                 Icon = trayIconIcon ?? SystemIcons.Information,
-                Text = "川中计算机协会 - 系统优化工具",
+                Text = "川中计算机协会-陈叔叔希沃优化助手",
                 ContextMenuStrip = trayMenu,
                 Visible = false
             };
@@ -1329,7 +1329,7 @@ namespace SeewoOpt
             }
 
             DialogResult result = MessageBox.Show(
-                "宁确定要退出系统优化工具吗？" + extra,
+                "您确定要退出陈叔叔希沃优化助手吗？" + extra,
                 "确认退出", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
                 MessageBoxDefaultButton.Button2);
 
@@ -1402,7 +1402,7 @@ namespace SeewoOpt
             UpdateButton(false);
 
             logTextBox.Clear();
-            logTextBox.AppendText($"PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.{_versionString}\n");
+            logTextBox.AppendText($"PEACE & LOVE 川中计算机协会 陈叔叔希沃优化助手 ver.{_versionString}\n");
             logTextBox.AppendText(new string('-', 50) + "\n");
             syncThread = new Thread(new ThreadStart(() =>
             {
@@ -1412,7 +1412,7 @@ namespace SeewoOpt
                     UpdateStatus("正在初始化...", Color.Yellow);
                     UpdateProgressBar(true);
 
-                    AddLog($"PEACE & LOVE 川中计算机协会 陈叔叔希沃系统优化工具 ver.{_versionString}\n", Color.DarkBlue);
+                    AddLog($"PEACE & LOVE 川中计算机协会 陈叔叔希沃优化助手 ver.{_versionString}\n", Color.DarkBlue);
                     AddLog($"可用时间服务器: {NtpServers.Length} 个\n", Color.DarkBlue);
                     AddLog(new string('-', 50) + "\n", Color.DarkGray);
 
