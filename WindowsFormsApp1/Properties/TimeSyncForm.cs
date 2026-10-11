@@ -847,10 +847,31 @@ namespace SeewoOpt
                    + $"预定于 {result.DueAt:HH:mm} 关机");
 
             DialogResult choice;
+            bool closedBySessionEnd;
             using (var dlg = new ShutdownWarningDialog(
                 (int)ShutdownScheduleLogic.WarnMinutesAhead, result.DueAt))
             {
                 choice = dlg.ShowDialog(this);
+                // 必须在 using 内读取：出块之后对象已 Dispose
+                closedBySessionEnd = dlg.ClosedBySessionEnd;
+            }
+
+            // 【系统结束会话时关掉这个框，不等于用户选了"本次不关机"】
+            //
+            // 探针实测（tools/ShutdownSessionProbe）：关机流程中 Windows 会向
+            // 本框发 WM_QUERYENDSESSION，它随即被关掉且 ShowDialog 返回 Cancel。
+            // 若照下面的白名单处理，Cancel 会落到"不关机"一侧，进而调用
+            // SkipOnce() → `shutdown /a`——**把正在进行的关机撤销掉**。
+            //
+            // 两种糟糕后果都会发生：
+            //   · 本次是我们自己的定时关机：刚下发就被自己撤销，机器不关；
+            //   · 是老师手动发起的关机：我们把老师的关机也一并取消了。
+            //
+            // 所以这个判断必须先于白名单，且直接返回、不做任何跳过或撤销。
+            if (closedBySessionEnd)
+            {
+                WriteLog("提醒框因系统结束会话被关闭，非用户选择，不执行任何跳过/撤销");
+                return;
             }
 
             // 【只有明确点"确认"才关机，其余一切情况都算"本次不关机"】
@@ -1050,6 +1071,40 @@ namespace SeewoOpt
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
+            // 【系统关机/注销必须放行——这是实机缺陷"本程序正在阻止 Windows 关闭"的根因】
+            //
+            // 探针实测（tools/ShutdownSessionProbe，net48 真实消息流）：
+            // 只要 FormClosing 里设了 e.Cancel = true，.NET 对
+            // WM_QUERYENDSESSION 就返回 0（FALSE）＝**否决系统关机**。
+            // Windows 随即便弹出「还需要关闭 1 个程序 / 此程序正在阻止
+            // Windows 关闭」，要求用户手动点"强制关机"——教室里没人会去
+            // 点那个按钮，机器就一直卡在那里。
+            //
+            // 而"点 × 缩到托盘"的本意只针对**用户关窗**
+            // （CloseReason.UserClosing）。系统要结束会话时照旧拦截，
+            // 等于对着 Windows 说"不许关机"。这是把两件不同的事
+            // 用了同一条分支处理导致的。
+            //
+            // 因此先按关闭原因分流：系统级关闭直接放行，并复用
+            // _exitingProgram 那条清理路径（摘托盘图标、真正退出进程）。
+            //
+            // 【判断条件为什么抽到 SessionClosePolicy】
+            // 这条分流是本次修复的核心，必须能被回归测试盯住。
+            // 抽成独立类型后，探针（tools/ShutdownSessionProbe）链接的是
+            // **同一份源码**，用真实的 WM_QUERYENDSESSION / SC_CLOSE 消息
+            // 驱动它——而不是在测试里复刻一份可能悄悄跑偏的副本。
+            //
+            // 【为什么只放行 WindowsShutDown，不放行 TaskManagerClosing】
+            // 任务管理器"结束任务"属于用户显式想结束本程序之外的场景，
+            // 但教室里更常见的是学生想绕过关机管理去结束它——那种情况下
+            // 保持"缩到托盘、继续守着"反而是本程序该做的事。
+            // 本批只修实机报的关机缺陷，不顺手改动这条策略（探针 6 把它钉住）。
+            if (SessionClosePolicy.IsSystemSessionEnd(e.CloseReason))
+            {
+                WriteLog($"收到系统关机/注销请求（CloseReason={e.CloseReason}），放行关闭并清理托盘");
+                _exitingProgram = true;
+            }
+
             // 【常驻模式下的关窗语义变了】
             //
             // 原逻辑：只在 syncCompleted（任务完成）或同步被取消/权限错误时
@@ -1086,6 +1141,60 @@ namespace SeewoOpt
 
             e.Cancel = true;
             MinimizeToTray();
+        }
+
+        // ============================================================
+        // 系统会话结束（关机 / 注销）的窗口消息
+        // ============================================================
+
+        private const int WM_QUERYENDSESSION = 0x0011;
+        private const int WM_ENDSESSION = 0x0016;
+
+        /// <summary>
+        /// 拦系统会话消息：全程记日志，并在会话真正结束时主动退出。
+        ///
+        /// 【为什么同意关机还不够，必须处理 WM_ENDSESSION】
+        /// WM_QUERYENDSESSION 只是系统"征求意见"，返回 TRUE 仅表示不反对；
+        /// 真正宣告"会话现在结束"的是随后的 WM_ENDSESSION。
+        /// 若收到它之后进程还赖着不走，在 Windows 眼里仍然是
+        /// "一个没退出的程序"——正是本次要消灭的那类现象。
+        ///
+        /// 所以这里在会话确实要结束时主动 Close()，让 Application.Run 返回、
+        /// 走 Program.Shutdown 的正常收尾（日志写完、托盘图标摘掉），
+        /// 不留一个等着被系统强杀的进程。
+        ///
+        /// 【为什么只在 wParam != 0 时才退】
+        /// wParam = 0 的含义是"先前那次关机请求已被撤销、会话不结束"。
+        /// 那种情况必须原地不动——否则一次未遂的关机就能把本程序杀掉，
+        /// 守候关机时间点的功能随之失效。
+        /// </summary>
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_QUERYENDSESSION || m.Msg == WM_ENDSESSION)
+            {
+                WriteLog($"收到系统会话消息 0x{m.Msg:X4}（wParam={m.WParam}）");
+            }
+
+            // 先交给基类：WM_QUERYENDSESSION 会由它触发 FormClosing，
+            // 并把"同意/否决"写进 m.Result。FormClosing 那边已按
+            // CloseReason 放行系统关机，所以这里不需要再改 m.Result。
+            base.WndProc(ref m);
+
+            if (m.Msg == WM_ENDSESSION && m.WParam != IntPtr.Zero)
+            {
+                _exitingProgram = true;
+                // 用 BeginInvoke 而不是直接 Close()：这里是窗口过程内部，
+                // 直接关窗会让关闭流程在本轮消息处理中途重入。
+                // 投到消息队列末尾，等这一轮处理干净再执行。
+                try
+                {
+                    BeginInvoke(new MethodInvoker(Close));
+                }
+                catch (Exception ex)
+                {
+                    WriteLog($"会话结束时关闭窗体失败：{ex.Message}");
+                }
+            }
         }
 
         private void MinimizeToTray()

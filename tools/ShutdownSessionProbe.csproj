@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AssemblyName>ShutdownSessionProbe</AssemblyName>
+    <RootNamespace>SeewoOpt.Tools</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>7.3</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      会话结束探针：验证 .NET WinForms 在 WM_QUERYENDSESSION 下到底返回什么。
+
+      【为什么必须做这个实验，而不是查文档下结论】
+      实机缺陷是"本程序正在阻止 Windows 关闭"。要修它，必须知道
+      .NET Framework 的 Form 在收到 WM_QUERYENDSESSION 时的真实行为：
+        · 它会不会触发 FormClosing？
+        · 若 FormClosing 里 e.Cancel = true，它是返回 FALSE（否决关机）
+          还是照样返回 TRUE？
+        · 模态对话框被系统问到时，会不会自己关掉？
+
+      这三点任何一条猜错，改出来的修复都会是错的——
+      而且这类错误在沙箱里跑单元测试是发现不了的（测不到真实消息流）。
+      探针用 SendMessage 直接投递 WM_QUERYENDSESSION，读回返回值，
+      是当前环境下唯一能拿到"真实消息语义"的办法。
+
+      【为什么是 net48】
+      必须与产品同一个 WinForms 实现。net10 的 WinForms 行为不同，
+      测出来的结论不能用于 net48 产品。
+
+      链接真实源码：ShutdownWarningDialog（探针要问的正是它）。
+    -->
+    <Compile Include="ShutdownSessionProbe.cs" />
+    <Compile Include="..\WindowsFormsApp1\ShutdownWarningDialog.cs" />
+    <!--
+      关键：链接**产品同一份**关闭策略源码。
+
+      探针 4/5/6 断言的是"修复后的主窗体策略"，如果在这里复刻一份
+      看起来一样的判断，那么产品改了而副本没改时，探针依然全绿——
+      什么都没验证到。链接真源码后，改坏产品必然让探针变红。
+      （这正是本项目第六批「鉴别力验证」得出的教训。）
+    -->
+    <Compile Include="..\WindowsFormsApp1\Services\SessionClosePolicy.cs" />
+  </ItemGroup>
+</Project>

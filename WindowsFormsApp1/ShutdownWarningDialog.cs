@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.Windows.Forms;
+using SeewoOpt.Services;
 
 namespace SeewoOpt
 {
@@ -48,6 +49,32 @@ namespace SeewoOpt
     /// </summary>
     public class ShutdownWarningDialog : Form
     {
+        /// <summary>
+        /// 本次关闭是否由**系统结束会话（关机 / 注销）**引起，而非用户操作。
+        ///
+        /// 【为什么必须把这个区分暴露给调用方——实机缺陷的直接对策】
+        /// 探针实测（tools/ShutdownSessionProbe，net48 真实消息流）：
+        /// 系统关机时 Windows 会向本对话框发 WM_QUERYENDSESSION，
+        /// .NET 据此触发 FormClosing（CloseReason = WindowsShutDown），
+        /// 对话框随即被关掉，而 ShowDialog 返回的是 **Cancel**——
+        /// 与"用户点了本次不关机"的返回值完全一样。
+        ///
+        /// 而调用方（TimeSyncForm.HandleShutdownWarning）把 Cancel
+        /// 一律按"本次不关机"处理，于是会去调 ShutdownService.SkipOnce()，
+        /// 它内部要执行 `shutdown /a` 撤销关机。后果自相矛盾且严重：
+        ///   · 本次是我们自己的定时关机：刚下发的关机被自己撤销，机器不关；
+        ///   · 是老师手动发起的关机：我们把老师的关机也一并取消了。
+        ///
+        /// 因此这里如实记录"是系统关的我，不是用户选的"，
+        /// 由调用方据此跳过全部"本次不关机"的处理。
+        ///
+        /// 注意：它与 DialogResult 是**两个维度**——
+        /// DialogResult 回答"用户选了什么"，本属性回答"这次关闭是不是用户的意图"。
+        /// 系统关机时前者仍是 Cancel（因为 .NET 的默认关闭路径会这么填），
+        /// 只有配合本属性才能还原真相。
+        /// </summary>
+        public bool ClosedBySessionEnd { get; private set; }
+
         // ============================================================
         // 视觉常量
         //
@@ -236,6 +263,19 @@ namespace SeewoOpt
             // 那等于"关掉框就关机"，与用户要求完全相反。
             this.FormClosing += (s, e) =>
             {
+                // 【顺序不能反】先按关闭原因记下"这次是谁让我关的"，
+                // 再填 DialogResult。调用方正是拿 ClosedBySessionEnd
+                // 来否决 DialogResult 的语义的（见该属性注释）。
+                //
+                // 【为什么这里只记原因、不设 e.Cancel】
+                // 系统要关机时本框必须让开——它已经没有存在意义
+                // （关机是既定事实），拦住它反而会变成"阻止关机"的那一个。
+                //
+                // 判断复用 SessionClosePolicy：与主窗体用的是**同一条**规则，
+                // 两处各写一遍迟早会漂移（本项目的教训：复刻逻辑 = 假测试）。
+                if (SessionClosePolicy.IsSystemSessionEnd(e.CloseReason))
+                    ClosedBySessionEnd = true;
+
                 if (this.DialogResult == DialogResult.None)
                     this.DialogResult = DialogResult.Cancel;
             };

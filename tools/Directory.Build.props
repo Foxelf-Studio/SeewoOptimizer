@@ -1,0 +1,31 @@
+<Project>
+  <!--
+    tools/ 下的工程各自使用独立的 obj 目录。
+
+    【为什么需要这个文件——踩过的真实故障】
+    tools/ 下现在有四个工程（NtpClientTests、DialogRender、
+    ShutdownSessionProbe、UpdateRetrySimulation），它们同处一个目录。
+    而 NuGet 生成的 obj\project.assets.json 是**按目录**放的，不是按工程：
+    默认路径 $(MSBuildProjectExtensionsPath) 就是 obj\。
+
+    于是后构建的工程会把先构建工程的资产文件覆盖掉。实测现象：
+      · 先跑 DialogRender（net48）→ obj\project.assets.json 变成 net48；
+      · 再跑 NtpClientTests（net10.0）→ 报 NETSDK1005
+        "资产文件没有 net10.0 的目标"。
+
+    这个故障最坏的地方不是报错，而是**顺序敏感**：
+    哪次恰好撞对了顺序就会"看起来正常"，让人误以为验证通过了。
+    验证流程一旦取决于构建顺序，它的结论就不可信。
+
+    【为什么放在 Directory.Build.props 而不是各 csproj 里】
+    BaseIntermediateOutputPath 必须在 SDK 计算中间目录之前就确定，
+    Directory.Build.props 由 SDK 在这之前自动导入，是唯一可靠的位置。
+
+    注意 $(MSBuildThisFileDirectory) 带结尾斜杠，
+    且 BaseIntermediateOutputPath 按约定也必须以斜杠结尾。
+  -->
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+</Project>

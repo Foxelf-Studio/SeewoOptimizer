@@ -30,5 +30,11 @@
     -->
     <Compile Include="DialogRender.cs" />
     <Compile Include="..\WindowsFormsApp1\ShutdownWarningDialog.cs" />
+    <!--
+      ShutdownWarningDialog 现在引用 SessionClosePolicy（判断"是不是系统在结束会话"）。
+      必须链接同一份源码——若这里复刻一份判断，产品改了副本不改，
+      渲染工具照样能跑绿，掩盖真实差异。
+    -->
+    <Compile Include="..\WindowsFormsApp1\Services\SessionClosePolicy.cs" />
   </ItemGroup>
 </Project>
