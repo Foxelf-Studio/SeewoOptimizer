@@ -48,6 +48,19 @@ namespace SeewoOpt.Services
         public DateTime FirstRunDate { get; set; }
 
         /// <summary>
+        /// 上一次"时间已校准"时算出的守护天数，供启动早期直接显示。
+        ///
+        /// 【为什么需要缓存一个天数】
+        /// 程序启动那一刻的时钟可能停在 2000 年，据此算出的天数毫无意义
+        /// （实机曾显示 9781 天）。既然算不准，就不要算——先显示上一次
+        /// 确认过的值，等时间同步成功后再重算并覆盖。
+        ///
+        /// 负数表示"尚无已确认的记录"（全新安装），此时界面保留
+        /// "正在确认守护天数..."的占位文案，而不是编一个数字出来。
+        /// </summary>
+        public int LastKnownGuardedDays { get; set; }
+
+        /// <summary>
         /// 关机时间点，最多 <see cref="MaxShutdownRules"/> 条。
         /// 空列表表示不启用关机功能。
         /// </summary>
@@ -68,6 +81,8 @@ namespace SeewoOpt.Services
                 KillWps = true,
                 AutoStartTask = false,          // 需求：启动时不默认自动执行
                 FirstRunDate = DateTime.MinValue,
+                // -1 = 尚无已确认的守护天数（界面保留"正在确认..."占位）
+                LastKnownGuardedDays = -1,
                 ShutdownRules = new List<ShutdownTimeRule>()
             };
         }
@@ -89,25 +104,30 @@ namespace SeewoOpt.Services
         }
 
         /// <summary>
-        /// 已守护的天数（含第 1 天）。
+        /// 已守护的天数。**首次运行当天为第 0 天**。
         ///
         /// 【为什么把起始日按"日期"而不是"时刻"相减】
         /// 若用 (今天-起始).TotalDays 直接取整，那么"昨天 23:00 首次运行、
         /// 今天 08:00 打开"会算出 0 天——明明是第二天了。改为把两端都归到
         /// 当日零点再相减，跨过午夜就算一天。
         ///
-        /// 结果恒 >= 1：首次运行当天显示"第 1 天"，不显示"第 0 天"。
-        /// 起始日缺失（旧版本升级上来）时按今天算，同样是第 1 天。
+        /// 【为什么首日是 0 而不是 1——用户 2026-10-11 明确要求】
+        /// "第一次运行程序的那天不算 1 天，算 0 天"。
+        /// 语义上也更贴切：那天结束时才算守护满一天，
+        /// 开口就说"已守护 1 天"是虚报。于是：
+        ///   首次运行当天 → 第 0 天；次日 → 第 1 天；以此类推。
+        ///
+        /// 起始日缺失或落在未来时一律返回 0（不显示负数）。
         /// </summary>
         public int GuardedDays(DateTime today)
         {
-            if (FirstRunDate == DateTime.MinValue) return 1;
+            if (FirstRunDate == DateTime.MinValue) return 0;
 
             DateTime startDay = FirstRunDate.Date;
             DateTime todayDay = today.Date;
 
-            int days = (int)(todayDay - startDay).TotalDays + 1;
-            return days < 1 ? 1 : days;
+            int days = (int)(todayDay - startDay).TotalDays;
+            return days < 0 ? 0 : days;
         }
     }
 
@@ -173,6 +193,8 @@ namespace SeewoOpt.Services
                     settings.KillWps = ReadBool(key, "KillWps", settings.KillWps);
                     settings.AutoStartTask = ReadBool(key, "AutoStartTask", settings.AutoStartTask);
                     settings.FirstRunDate = ReadDate(key, "FirstRunDate", settings.FirstRunDate);
+                    settings.LastKnownGuardedDays =
+                        ReadInt(key, "LastKnownGuardedDays", settings.LastKnownGuardedDays);
                     settings.ShutdownRules = ReadShutdownRules(key);
                 }
             }
@@ -208,6 +230,11 @@ namespace SeewoOpt.Services
                     // "已守护 x 天"会永远显示 1 天——而它恰恰是每天都要看的数字。
                     if (settings.FirstRunDate != DateTime.MinValue)
                         key.SetValue("FirstRunDate", FormatDate(settings.FirstRunDate));
+
+                    // 已确认的守护天数：负数表示"尚无记录"，不写盘
+                    // （留给界面显示占位文案，而不是显示一个编造的 0）。
+                    if (settings.LastKnownGuardedDays >= 0)
+                        key.SetValue("LastKnownGuardedDays", settings.LastKnownGuardedDays);
 
                     // 关机规则存成一个 REG_SZ，各条之间用 ';' 分隔，每条是一个整数编码。
                     // 用单值而非五个独立键：规则数量是可变的，用定长键名会留下

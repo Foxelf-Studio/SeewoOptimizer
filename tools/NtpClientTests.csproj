@@ -34,6 +34,13 @@
     <Compile Include="..\WindowsFormsApp1\Services\ShutdownSchedule.cs" />
     <Compile Include="..\WindowsFormsApp1\Services\SettingsStore.cs" />
     <!--
+      守护天数起始日的可信度判定。可以链接真实源码：它是纯函数，
+      只依赖 System.DateTime，零 UI 依赖。
+      这一点很关键——"实机那条 2000-01-01 的记录会被判定为不可信"
+      这条断言，测的必须是产品真正用的那份判断。
+    -->
+    <Compile Include="..\WindowsFormsApp1\Services\GuardDayPolicy.cs" />
+    <!--
       ShutdownService 本身（不只是它的纯逻辑）也要编进来。
       原因：本轮把"到点关机"的判定从"每轮从规则实时推导"改成了
       "由承诺时刻驱动"，而承诺状态（_promisedAt）与记账状态都活在这个类里。

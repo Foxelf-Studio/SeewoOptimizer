@@ -623,14 +623,15 @@ namespace SeewoOpt
 
                 EnsureAutoStartConsistency();
 
-                // 先记首次运行日期——"守护天数"要立刻显示，不能等到同步之后。
-                RecordFirstRunDateIfNeeded();
-
-                // 【需求 3 的"时间同步成功后再确认今天是第几天"】
-                // 启动时先按当前（可能错误的）系统时间显示一次，让用户
-                // 一眼有东西看；同步成功后会再刷新一遍。之所以要"再确认"，
-                // 是因为本机时钟可能停在 2000 年，那时算出来的天数是错的。
-                RefreshGuardDays();
+                // 【守护天数：启动阶段只显示"上次确认过的值"】
+                //
+                // 这里**不记录**起始日，也**不计算**天数——此刻的系统时钟
+                // 可能停在 2000 年（本程序的典型使用场景），据此算出来或记下来
+                // 的都是垃圾值。实机就因此在时钟被校准后显示过 9781 天。
+                //
+                // 真正的记录与计算发生在时间同步成功之后，见
+                // RefreshGuardDaysAfterTimeSync。
+                ShowStoredGuardDays();
 
                 StartShutdownWatcher();
 
@@ -700,62 +701,122 @@ namespace SeewoOpt
         }
 
         /// <summary>
-        /// 首次运行时把当天写进设置，作为"已守护 x 天"的起点。
+        /// 启动时**还没有可信时钟**，只显示上一次确认过的守护天数。
         ///
-        /// 【为什么在这里写而不是在 SettingsStore.Load 里顺手写】
-        /// Load 是个纯读取函数，它写注册表会让"读设置"带上副作用——
-        /// 单测、诊断工具调它一次就改了用户数据。写入收敛到这一处显式调用。
+        /// 【为什么不在这里算、也不在这里记起始日——实机缺陷的直接对策】
+        /// 启动那一刻的系统时钟可能停在 2000-01-01。在这个前提下去
+        /// "记录首次运行日期"，等于把错误当成事实写进注册表：
+        /// 等 NTP 把时钟校准到 2026-10-11 之后再看那个起点，
+        /// 算出来就是 9781 天（用户实机截图里的数字）。
+        ///
+        /// 所以启动阶段只做一件事：把**上一次确认过的数字**摆出来。
+        /// 用户要求的就是这个——"时间同步成功前显示上一次的值"。
+        /// 全新安装时还没有确认过的值，保持"正在确认守护天数..."的占位，
+        /// 不去编一个数字。
+        ///
+        /// 【代价：若这台机器从不做时间同步，天数会一直停在旧值】
+        /// 这是有意的——宁可显示一个"上次确认过的旧数字"，
+        /// 也不显示一个基于错误时钟算出来的假数字。而本程序的主流程
+        /// （"开始执行"）本身就会同步时间，正常使用下不会长期如此。
         /// </summary>
-        private void RecordFirstRunDateIfNeeded()
+        private void ShowStoredGuardDays()
         {
             try
             {
                 AppSettings settings = SettingsStore.Load();
-                if (settings.FirstRunDate != DateTime.MinValue)
+                if (settings.LastKnownGuardedDays >= 0)
                 {
-                    _firstRunDate = settings.FirstRunDate;
-                    return;
+                    SetGuardLabel(settings.LastKnownGuardedDays);
+                    WriteLog($"守护天数（时间未校准，显示上次确认值）："
+                           + $"第 {settings.LastKnownGuardedDays} 天");
                 }
-
-                _firstRunDate = DateTime.Now.Date;
-                settings.FirstRunDate = _firstRunDate;
-                // 只补这一个字段，其余原样回写，避免把界面上还没加载的值覆盖掉
-                settings.AutoStartTask = _autoStartTask;
-                settings.ShutdownRules = _shutdownRules;
-                SettingsStore.Save(settings);
-
-                WriteLog($"首次运行，记录守护起始日期：{_firstRunDate:yyyy-MM-dd}");
+                else
+                {
+                    WriteLog("守护天数：还没有已确认的记录，保留占位文案，等时间同步后确认");
+                }
             }
             catch (Exception ex)
             {
-                WriteLog($"记录首次运行日期失败：{ex.Message}");
+                WriteLog($"读取守护天数失败：{ex.Message}");
             }
         }
 
         /// <summary>
-        /// 刷新上半屏的"已守护本电脑 x 天"。
+        /// 时间同步成功后：确认/记录守护起始日 → 重算天数 → 显示 → 存下。
         ///
-        /// 同步成功后会被再调一次：启动时系统时钟可能停在 2000 年，
-        /// 那时算出来的天数是错的（可能是个天文数字或 1 天）。
-        /// 时间校准之后再算一次，显示的才是真实天数。
+        /// 【为什么必须等同步成功之后才记起始日】
+        /// 这是本次修复的核心。记起始日的前提是"今天几号"可信，
+        /// 而唯一能确认这件事的就是一次成功的时间同步
+        /// （同步成功后系统时钟就是 NTP 时间）。在此之前记录的每一个日期
+        /// 都可能是 2000 年那种垃圾值。
+        ///
+        /// 【为什么要校验旧记录，而不只是"没记过才记"】
+        /// 已经在注册表里的旧值同样可能是错误时钟记下的（用户机器上就是），
+        /// 光修"新记录"救不了它。因此每次同步成功都过一遍
+        /// <see cref="GuardDayPolicy"/>，剔除逻辑上不可能成立的值
+        /// （晚于今天 / 早于功能上线日），并把重置原因写进日志。
+        ///
+        /// 【天数为什么要存回注册表】
+        /// 供下次启动早期直接显示（那时时钟还不可信，不能现算）。
         /// </summary>
-        private void RefreshGuardDays()
+        private void RefreshGuardDaysAfterTimeSync()
         {
-            int days = 1;
+            int days = 0;
             try
             {
+                DateTime now = DateTime.Now;
                 AppSettings settings = SettingsStore.Load();
-                DateTime first = settings.FirstRunDate != DateTime.MinValue
-                    ? settings.FirstRunDate : DateTime.Now.Date;
-                days = settings.GuardedDays(DateTime.Now);
-            }
-            catch
-            {
-                // 读设置失败也要有个可显示的数字，不能因为一次 I/O 异常
-                // 让上半屏一片空白——那看起来像程序坏了
-                days = 1;
-            }
 
+                GuardDayPolicy.FirstRunDateVerdict verdict;
+                DateTime trusted = GuardDayPolicy.ResolveTrustedFirstRunDate(
+                    settings.FirstRunDate, now, out verdict);
+
+                // 把判定结果如实写进日志：将来"天数不对"时，
+                // 这里是唯一能看出"起点被重置过、为什么被重置"的地方。
+                switch (verdict)
+                {
+                    case GuardDayPolicy.FirstRunDateVerdict.Missing:
+                        WriteLog($"时间已校准，记录守护起始日期：{trusted:yyyy-MM-dd}");
+                        break;
+
+                    case GuardDayPolicy.FirstRunDateVerdict.InFuture:
+                        WriteLog($"守护起始日期 {settings.FirstRunDate:yyyy-MM-dd} 晚于今天"
+                               + $"（{now:yyyy-MM-dd}），只可能是在时钟不准时记下的，"
+                               + $"已重置为 {trusted:yyyy-MM-dd}");
+                        break;
+
+                    case GuardDayPolicy.FirstRunDateVerdict.BeforeFeatureEpoch:
+                        WriteLog($"守护起始日期 {settings.FirstRunDate:yyyy-MM-dd} 早于本功能上线日"
+                               + $"（{GuardDayPolicy.FeatureEpoch:yyyy-MM-dd}），不可能成立，"
+                               + $"已重置为 {trusted:yyyy-MM-dd}");
+                        break;
+                }
+
+                settings.FirstRunDate = trusted;
+                days = settings.GuardedDays(now);
+                settings.LastKnownGuardedDays = days;
+
+                // 只改这两个字段，其余按读回的原样回写
+                SettingsStore.Save(settings);
+                _firstRunDate = trusted;
+
+                SetGuardLabel(days);
+                WriteLog($"守护天数已刷新：第 {days} 天");
+            }
+            catch (Exception ex)
+            {
+                WriteLog($"刷新守护天数失败：{ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 把天数写进上半屏；调用方可能在同步线程上，需要切回 UI 线程。
+        ///
+        /// 单独抽出来是因为现在有两个调用点（同步前显示旧值、
+        /// 同步后显示新值），而 InvokeRequired 的处理只该有一份。
+        /// </summary>
+        private void SetGuardLabel(int days)
+        {
             string text = string.Format(
                 "陈叔叔希沃优化助手\n已守护本电脑 {0} 天", days);
 
@@ -766,7 +827,6 @@ namespace SeewoOpt
                 return;
             }
             guardLabel.Text = text;
-            WriteLog($"守护天数已刷新：第 {days} 天");
         }
 
         /// <summary>
@@ -1489,10 +1549,12 @@ namespace SeewoOpt
                         if (trayIcon != null)
                             trayIcon.ShowBalloonTip(3000, "时间同步完成", "系统时间已成功同步！", ToolTipIcon.Info);
 
-                        // 【需求 3：时间同步成功后再确认今天是第几天】
-                        // 启动时那次刷新用的是当时（可能是 2000 年）的系统时间，
-                        // 算出来的天数不对。此刻系统时钟刚刚被校正，必须重算一次。
-                        RefreshGuardDays();
+                        // 【守护天数：现在是唯一可以采信的时刻】
+                        // 系统时钟刚刚被 NTP 校准，此刻"今天几号"才可信。
+                        // 在这里才记录/校验起始日并重算天数——启动时那次
+                        // 用的是 2000 年那种错误时钟，既不能算也不能记
+                        // （实机曾因此显示 9781 天）。
+                        RefreshGuardDaysAfterTimeSync();
 
                         // 必须在下面检查 UpdateCheckCompleted 之前重试。
                         // 本工具的使用场景就是"时钟错误"，而时钟错误会让

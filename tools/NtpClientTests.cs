@@ -83,11 +83,12 @@ internal static class NtpClientTests
         TestShutdownSerializationToleratesGarbage();
 
         // --- 守护天数（"已守护 x 天"的计数契约）---
-        TestGuardedDaysFirstDayIsOne();
+        TestGuardedDaysFirstDayIsZero();
         TestGuardedDaysCrossesMidnight();
-        TestGuardedDaysUnrecordedFallsBackToOne();
+        TestGuardedDaysUnrecordedFallsBackToZero();
         TestGuardedDaysNeverGoesBackwards();
         TestGuardedDaysIgnoresTimeOfDay();
+        TestFirstRunDateTrust();
 
         // --- 设置规整（注册表可手改，界面限不住）---
         TestSettingsNormalizeClampsRuleCount();
@@ -1757,10 +1758,15 @@ internal static class NtpClientTests
     // 而它恰恰错得最隐蔽：写成 (today - FirstRunDate).TotalDays 时，
     // 同一天的多数时刻仍会算出看起来合理的值，只有跨午夜的那一小段
     // 才暴露为 0 天。测试必须钉住"跨午夜"和"时刻无关"这两条。
+    //
+    // 【2026-10-11 用户改口径：首次运行当天算第 0 天】
+    // 原契约是"首次运行当天为第 1 天"（+1 补偿）。用户明确要求改为
+    // "第一次运行程序的那天不算 1 天，算 0 天"——那天结束时才算守护满
+    // 一天，开口就说"已守护 1 天"是虚报。整组断言随之改口径。
     // ---------------------------------------------------------------
 
-    /// <summary>首次运行当天：第 1 天，而不是第 0 天。</summary>
-    private static void TestGuardedDaysFirstDayIsOne()
+    /// <summary>首次运行当天：第 0 天（用户 2026-10-11 明确要求）。</summary>
+    private static void TestGuardedDaysFirstDayIsZero()
     {
         var s = new SeewoOpt.Services.AppSettings
         {
@@ -1768,12 +1774,19 @@ internal static class NtpClientTests
         };
 
         int days = s.GuardedDays(new DateTime(2026, 10, 10, 9, 31, 0));
-        Check("首次运行当天为第 1 天", days == 1, $"得到 {days}");
+        Check("首次运行当天为第 0 天", days == 0, $"得到 {days}");
+
+        // 当天最后一刻仍是第 0 天——跨过午夜才变成第 1 天
+        int lastMoment = s.GuardedDays(new DateTime(2026, 10, 10, 23, 59, 59));
+        Check("首次运行当天 23:59 仍是第 0 天", lastMoment == 0, $"得到 {lastMoment}");
+
+        int nextDay = s.GuardedDays(new DateTime(2026, 10, 11, 0, 0, 0));
+        Check("跨过午夜变成第 1 天", nextDay == 1, $"得到 {nextDay}");
     }
 
     /// <summary>
     /// 跨午夜即算新的一天——这条专门抓"按时刻相减"的错误写法。
-    /// 昨天 23:00 首次运行、今天 08:00 打开，必须是第 2 天。
+    /// 昨天 23:00 首次运行、今天 08:00 打开，必须是第 1 天。
     /// </summary>
     private static void TestGuardedDaysCrossesMidnight()
     {
@@ -1783,20 +1796,20 @@ internal static class NtpClientTests
         };
 
         int days = s.GuardedDays(new DateTime(2026, 10, 11, 8, 0, 0));
-        Check("昨天 23:00 → 今天 08:00 为第 2 天（跨午夜）",
-            days == 2, $"得到 {days}｜按时刻相减会算成 {(new DateTime(2026,10,11,8,0,0) - s.FirstRunDate).TotalDays.ToString("0.####")}");
+        Check("昨天 23:00 → 今天 08:00 为第 1 天（跨午夜）",
+            days == 1, $"得到 {days}｜按时刻相减会算成 {(new DateTime(2026,10,11,8,0,0) - s.FirstRunDate).TotalDays.ToString("0.####")}");
 
-        // 反向确认：同一天内不论怎么过，都是第 1 天
+        // 反向确认：同一天内不论怎么过，都是第 0 天
         int sameDayLate = s.GuardedDays(new DateTime(2026, 10, 10, 23, 59, 59));
-        Check("同一天 23:00 → 23:59 仍为第 1 天", sameDayLate == 1, $"得到 {sameDayLate}");
+        Check("同一天 23:00 → 23:59 仍为第 0 天", sameDayLate == 0, $"得到 {sameDayLate}");
     }
 
-    /// <summary>未记录首次运行日期时（旧版本升级上来）回退为第 1 天。</summary>
-    private static void TestGuardedDaysUnrecordedFallsBackToOne()
+    /// <summary>未记录首次运行日期时（旧版本升级上来）回退为第 0 天。</summary>
+    private static void TestGuardedDaysUnrecordedFallsBackToZero()
     {
         var s = new SeewoOpt.Services.AppSettings { FirstRunDate = DateTime.MinValue };
         int days = s.GuardedDays(new DateTime(2026, 10, 10, 12, 0, 0));
-        Check("未记录起始日时回退为第 1 天", days == 1, $"得到 {days}");
+        Check("未记录起始日时回退为第 0 天", days == 0, $"得到 {days}");
     }
 
     /// <summary>
@@ -1811,12 +1824,12 @@ internal static class NtpClientTests
         };
 
         int days = s.GuardedDays(new DateTime(2026, 10, 10, 12, 0, 0));
-        Check("起始日在未来时不出现 0 天或负天数", days >= 1, $"得到 {days}");
+        Check("起始日在未来时不出现负天数", days == 0, $"得到 {days}");
     }
 
     /// <summary>
     /// 天数只与"日期"有关，与当天几点无关。
-    /// 把起始日固定在 10 月 10 日，则 10 月 15 日不论何时打开都应是第 6 天。
+    /// 把起始日固定在 10 月 10 日，则 10 月 15 日不论何时打开都应是第 5 天。
     /// </summary>
     private static void TestGuardedDaysIgnoresTimeOfDay()
     {
@@ -1833,19 +1846,95 @@ internal static class NtpClientTests
             new DateTime(2026, 10, 15, 23, 59, 59),
         };
 
-        bool allSix = true;
+        bool allFive = true;
         string detail = null;
         foreach (var p in probes)
         {
             int d = s.GuardedDays(p);
-            if (d != 6)
+            if (d != 5)
             {
-                allSix = false;
-                detail = $"{p:yyyy-MM-dd HH:mm:ss} 得到 {d} 天，应为 6";
+                allFive = false;
+                detail = $"{p:yyyy-MM-dd HH:mm:ss} 得到 {d} 天，应为 5";
                 break;
             }
         }
-        Check("10/10 起算，10/15 全天各时刻均为第 6 天", allSix, detail);
+        Check("10/10 起算，10/15 全天各时刻均为第 5 天", allFive, detail);
+    }
+
+    /// <summary>
+    /// 守护起始日的可信度判定——**直接用实机那条错误记录回归**。
+    ///
+    /// 【实机缺陷】2026-10-11，用户机器系统时钟停在 2000-01-01，
+    /// 程序在那一刻把"首次运行日期"记成了 2000-01-01；
+    /// NTP 校准到真实日期后，界面显示 **9781 天**（用户截图）。
+    /// 9781 = (2026-10-11 − 2000-01-01) + 1，正是旧公式算出来的值。
+    ///
+    /// 修法：同步成功之后才记录起始日，并且每次都校验旧值，
+    /// 剔除"不可能成立"的（晚于今天 / 早于功能上线日）。
+    /// </summary>
+    private static void TestFirstRunDateTrust()
+    {
+        DateTime today = new DateTime(2026, 10, 11);
+
+        // 判定的三个方向
+        Check("空值判定为 Missing（尚未记录）",
+            SeewoOpt.Services.GuardDayPolicy.Judge(DateTime.MinValue, today)
+                == SeewoOpt.Services.GuardDayPolicy.FirstRunDateVerdict.Missing);
+
+        Check("实机那条 2000-01-01 判定为不可信（早于功能上线日）",
+            SeewoOpt.Services.GuardDayPolicy.Judge(new DateTime(2000, 1, 1), today)
+                == SeewoOpt.Services.GuardDayPolicy.FirstRunDateVerdict.BeforeFeatureEpoch,
+            "不剔除它，界面就会继续显示那个 9781 天的假数字");
+
+        Check("落在未来的日期判定为不可信",
+            SeewoOpt.Services.GuardDayPolicy.Judge(new DateTime(2030, 1, 1), today)
+                == SeewoOpt.Services.GuardDayPolicy.FirstRunDateVerdict.InFuture);
+
+        Check("功能上线当天判定为可信（边界不能过严）",
+            SeewoOpt.Services.GuardDayPolicy.Judge(
+                SeewoOpt.Services.GuardDayPolicy.FeatureEpoch, today)
+                == SeewoOpt.Services.GuardDayPolicy.FirstRunDateVerdict.Trustworthy);
+
+        Check("今天判定为可信",
+            SeewoOpt.Services.GuardDayPolicy.Judge(today, today)
+                == SeewoOpt.Services.GuardDayPolicy.FirstRunDateVerdict.Trustworthy);
+
+        // 【为什么这里要换一个"今天"】
+        // 功能 2026-10-10 才上线，用 2026-10-11 当"今天"时，
+        // 不存在"跑了很久且仍然可信"的样本（上线前一天的值本就该判不可信）。
+        // 把时间推到一年后再看：一个跑了 200 多天的起始日仍应被采信——
+        // 判定只剔除逻辑上不可能的，不做"看起来太久"的主观判断。
+        DateTime nextYear = new DateTime(2027, 6, 1);
+        Check("跑了 200 多天的起始日仍判定为可信（不按'太久'来怀疑）",
+            SeewoOpt.Services.GuardDayPolicy.Judge(new DateTime(2026, 10, 10), nextYear)
+                == SeewoOpt.Services.GuardDayPolicy.FirstRunDateVerdict.Trustworthy,
+            "若这条被改成不可信，正常用了大半年的用户会被无故清零");
+
+        // 解析结果：不可信一律重置为今天
+        SeewoOpt.Services.GuardDayPolicy.FirstRunDateVerdict v1;
+        DateTime fixedUp = SeewoOpt.Services.GuardDayPolicy.ResolveTrustedFirstRunDate(
+            new DateTime(2000, 1, 1), today, out v1);
+        Check("2000-01-01 被重置为今天（从第 0 天重新开始）",
+            fixedUp == today,
+            $"得到 {fixedUp:yyyy-MM-dd}");
+
+        SeewoOpt.Services.GuardDayPolicy.FirstRunDateVerdict v2;
+        DateTime kept = SeewoOpt.Services.GuardDayPolicy.ResolveTrustedFirstRunDate(
+            new DateTime(2026, 10, 10), today, out v2);
+        Check("可信的旧值原样沿用，不被重置",
+            kept == new DateTime(2026, 10, 10) && v2
+                == SeewoOpt.Services.GuardDayPolicy.FirstRunDateVerdict.Trustworthy,
+            $"得到 {kept:yyyy-MM-dd}（{v2}）");
+
+        // 量级留证：那条错误记录若照旧使用，会显示成多大的数字
+        var bogus = new SeewoOpt.Services.AppSettings
+        {
+            FirstRunDate = new DateTime(2000, 1, 1)
+        };
+        int bogusDays = bogus.GuardedDays(today);
+        Check($"留证：以 2000-01-01 为起点会算出 {bogusDays} 天（实机截图显示 9781）",
+            bogusDays == 9780,
+            $"得到 {bogusDays}｜旧公式 +1 正是截图里的 9781");
     }
 
     /// <summary>
