@@ -188,7 +188,10 @@ SeewoOptimizer/
 │   ├── sync.cmd                 # 源码镜像：仓库 -> 本机构建工位
 │   ├── build.cmd                # 同步 + 编译
 │   ├── publish.cmd              # 同步 + 编译 + 签名 + 公钥自检
-│   └── NtpClientTests.cs(.csproj)   # NTP 协议解析单元测试
+│   ├── Directory.Build.props    # 让各工具工程各用独立 obj（避免相互覆盖）
+│   ├── NtpClientTests.cs(.csproj)      # 单元测试：NTP 协议 / 关机调度 / 设置序列化
+│   ├── DialogRender.cs(.csproj)        # 把关机提醒框渲染成 PNG，供人眼核对
+│   └── ShutdownSessionProbe.cs(.csproj) # 关机/注销链路探针：真实收发窗口消息
 └── .github/workflows/build.yml  # CI：编译校验 + 跑单元测试
 ```
 
@@ -229,6 +232,19 @@ git clone https://github.com/Foxelf-Studio/SeewoOptimizer.git
 
 CI 在每次 push / PR 时自动编译并跑单元测试，见 `.github/workflows/build.yml`。
 本地也可以单独跑 `tools/` 下的测试工程，验证 NTP 协议解析逻辑。
+
+```bash
+cd tools
+dotnet run --project NtpClientTests.csproj        # 单元测试，输出"通过 N 项，失败 M 项"
+dotnet run --project ShutdownSessionProbe.csproj  # 关机链路探针，退出码 0=通过
+dotnet run --project DialogRender.csproj          # 渲染提醒框 PNG 到 bin/Release/net48/render/
+```
+
+**关于 `ShutdownSessionProbe`**：它验证的是"窗口消息层"的行为——
+系统关机时本程序是否会被判定为「阻止 Windows 关闭」。
+这类缺陷不存在于任何纯函数里，单元测试测不到，只能用真实窗体 + 真实
+`SendMessage`（投递 `WM_QUERYENDSESSION` / `WM_SYSCOMMAND(SC_CLOSE)`）
+直接读回窗口过程的返回值。探针以退出码报告结果，可直接接进自动化。
 
 > **注意**：CI 只做编译校验，不发布产物——发布需要对 exe 用本机私钥签名，
 > 而私钥绝不能上传到云端。

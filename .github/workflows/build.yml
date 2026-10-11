@@ -207,3 +207,18 @@ jobs:
             Write-Error "NtpClient 测试未通过"
             exit 1
           }
+
+      # 【为什么这个探针必须进 CI】
+      # "本程序阻止 Windows 关闭"这个缺陷连续两轮流到了教室实机上
+      # （弹着提醒框不管它就触发）。它不在任何纯函数里，单元测试测不到，
+      # 只能靠真实窗体收发窗口消息来盯住——本探针就是这个抓手。
+      # 探针以退出码 0/1 报告结果，且已双向验证过鉴别力
+      # （改坏共享策略会让它变红），所以它有资格做 CI 的把关项。
+      - name: 运行关机链路探针（窗口消息层）
+        shell: pwsh
+        run: |
+          dotnet run --project tools\ShutdownSessionProbe.csproj -c Release
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "关机链路探针未通过：本程序可能又会阻止 Windows 关机"
+            exit 1
+          }
