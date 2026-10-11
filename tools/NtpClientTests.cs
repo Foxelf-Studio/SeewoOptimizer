@@ -61,6 +61,7 @@ internal static class NtpClientTests
         TestShutdownEmptyMaskNeverMatches();
         TestShutdownNextOccurrence();
         TestShutdownWarnWindow();
+        TestShutdownLateWarnSlipsDeliberately();
         TestShutdownCountdownIsImmediate();
         TestShutdownUsesAbsolutePath();
         TestShutdownDecidePriority();
@@ -1124,6 +1125,68 @@ internal static class NtpClientTests
 
         Check("关机时刻本身：不触发提醒（该走关机分支）",
             ShutdownScheduleLogic.FindRuleToWarn(rules, shutdownAt) == null);
+    }
+
+    /// <summary>
+    /// 在提醒窗口里才被发现时，关机时刻会**顺延**——这是被明确批准的取舍。
+    ///
+    /// 【为什么要在测试里把它钉成"预期行为"】
+    /// 2026-10-11 实机日志：规则配的是 08:50，实际 08:51:15 才关机。
+    /// 看上去像 bug，其实是承诺时刻的公式取向所致：
+    ///     promised = max(发现时刻所在分钟 + 提前量, 规则时刻)
+    /// 即"**保证给满提前量**"，规则时刻只是下限。
+    ///
+    /// 触发条件：程序在 5 分钟窗口内才启动，或改设置重启了巡检
+    /// （WinForms Timer 首次触发要等满一个轮询间隔，本例 20 秒）。
+    /// 最坏可顺延到 规则时刻 + (提前量 - 1) 分钟。
+    ///
+    /// 【用户决定：维持现状（2026-10-11）】
+    /// 提醒框是**唯一**能点"本次不关机"的机会。若不顺延，窗口内才启动的机器
+    /// 会弹出一个一闪而过的框，等于没有拦截机会；而对话框上写的就是顺延后的
+    /// 真实时刻，用户被如实告知，不存在"悄悄晚了"。
+    ///
+    /// 所以这个测试的用意与常见相反：**它保护的是"不要被修掉"**。
+    /// 将来若有人把顺延当 bug 改掉，这里会变红，逼他重新面对那个取舍
+    /// 并重新征求用户决定，而不是默默改掉。
+    /// </summary>
+    private static void TestShutdownLateWarnSlipsDeliberately()
+    {
+        // 2026-10-12 是周一
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(8, 50, DayOfWeek.Monday)
+        };
+        DateTime ruleTime = new DateTime(2026, 10, 12, 8, 50, 0);
+
+        // 窗口是 [08:45, 08:50)。这里模拟"程序在 08:46 才第一次巡检到"。
+        ShutdownService.ResetRuntimeState();
+        ShutdownService.PollResult late =
+            ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 8, 46, 0));
+
+        Check("窗口内才被发现（08:46）时仍然弹提醒",
+            late.ShouldWarn,
+            late.ShouldWarn ? "" : "不弹提醒会让这台机器静默准点关机，用户毫无拦截机会");
+
+        Check("承诺时刻顺延为 08:51（发现时刻 + 5 分钟），而非规则时刻 08:50",
+            late.DueAt == new DateTime(2026, 10, 12, 8, 51, 0),
+            $"得到 {late.DueAt:HH:mm}——这里就该晚于规则时刻，"
+          + "改掉它等于取消『保证给满 5 分钟提醒』的取舍");
+
+        Check("顺延后的时刻确实晚于用户配置的 08:50",
+            late.DueAt > ruleTime,
+            $"得到 {late.DueAt:HH:mm} 与规则 {ruleTime:HH:mm}");
+
+        // 反向契约：窗口一开始就被发现时**不**顺延。
+        // 有这一条才能证明上面测的是"顺延"而不是"公式整体偏移了"。
+        ShutdownService.ResetRuntimeState();
+        ShutdownService.PollResult onTime =
+            ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 8, 45, 0));
+
+        Check("窗口一开始就被发现（08:45）时承诺恰为准点 08:50（不顺延）",
+            onTime.ShouldWarn && onTime.DueAt == ruleTime,
+            $"得到 {(onTime.ShouldWarn ? onTime.DueAt.ToString("HH:mm") : "未提醒")}");
+
+        ShutdownService.ResetRuntimeState();
     }
 
     /// <summary>
