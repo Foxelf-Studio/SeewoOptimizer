@@ -86,6 +86,18 @@
 （REG_SZ，格式 `yyyy-MM-dd`）。改它、再点一次 **重新同步**，即可立刻看到结果——
 无需重启、无需改系统时间。
 
+> `HKCU` 是命令行里的缩写，注册表编辑器（regedit）里它的全名是
+> **HKEY_CURRENT_USER**。想用图形界面就展开
+> `HKEY_CURRENT_USER → Software → TimeSyncTool`；
+> 但下面的命令行方式更快、不会点错（`HKCU` 在 cmd 里直接可用）。
+> 键不存在时 `reg add` 会自动创建。
+
+**开始前先看一眼当前状态**（这条也会告诉你注册表里到底有什么）：
+
+```cmd
+reg query "HKCU\Software\TimeSyncTool"
+```
+
 **① 验证正常递增**
 
 把起始日设为**昨天**（下例假设今天是 2026-10-11）：
