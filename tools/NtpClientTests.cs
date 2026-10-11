@@ -71,6 +71,13 @@ internal static class NtpClientTests
         TestShutdownWarnsOncePerWindow();
         TestShutdownWarnsAgainNextDay();
         TestShutdownSkipResumesNextDay();
+        // 【顺序约束】TestSkipAbortDecision 会永久置位进程内的 _shutdownIssued，
+        // 一旦置位，之后任何 SkipOnce 都会真的去调 shutdown /a。
+        // 因此它必须排在所有会调用 SkipOnce 的测试之后
+        // （TestShutdownPromiseSkipDelayed / TestShutdownSkipResumesNextDay），
+        // 否则那些测试会对宿主机产生系统级副作用。
+        TestSkipAbortDecision();
+        TestExitCodeFormatting();
         TestShutdownSerializationRoundTrip();
         TestShutdownSerializationToleratesGarbage();
 
@@ -1193,6 +1200,76 @@ internal static class NtpClientTests
         Check("BuildShutdownStartInfo 参数原样透传",
             psi.Arguments == "/a",
             $"得到 {psi.Arguments}");
+    }
+
+    /// <summary>
+    /// "本次不关机"到底该不该去撤销系统关机。
+    ///
+    /// 【实机日志提出的问题（2026-10-11）】
+    /// 用户在提醒框里点了"本次不关机"，日志却写着
+    /// 「撤销关机未生效（shutdown /a 退出码 1116，通常表示当前没有进行中的关机）」，
+    /// 用户读到"未生效"便怀疑是不是没取消成功。
+    ///
+    /// 查下来是**日志措辞与实际动作不符**：/t 0 的设计下，提醒阶段根本不会
+    /// 下发任何关机命令（见 SystemCountdownSeconds 的注释），命令只在到点才发。
+    /// 所以"没有需要撤销的系统关机"是正常且正确的——机器确实没关。
+    ///
+    /// 修法：SkipOnce 先看 <see cref="ShutdownService.ShouldAbortOnSkip"/>，
+    /// 没下发过就只记账、不调 shutdown /a，日志也直说"无需撤销"。
+    ///
+    /// 【为什么本测试不真的走 SkipOnce 的"已下发"分支】
+    /// 那条分支会真的启动 shutdown.exe /a。单元测试不该对宿主机产生
+    /// 系统级副作用（万一测试机上恰好有进行中的关机，就被它撤销了）。
+    /// 因此这里只断言**决策**（ShouldAbortOnSkip），
+    /// 决策与动作之间的连线由 SkipOnce 里那一行直白代码保证。
+    ///
+    /// 【顺序约束】NoteShutdownIssued 会永久置位进程内的静态标志，
+    /// 所以两个方向都写在同一个测试里。若将来新增依赖
+    /// "未下发过"这一前提的断言，必须排在调用本测试之前。
+    /// </summary>
+    private static void TestSkipAbortDecision()
+    {
+        DateTime due = new DateTime(2026, 10, 12, 23, 40, 0);
+
+        // 方向一：从未下发过关机 → 跳过时不该去撤销
+        Check("未下发过关机时：ShouldAbortOnSkip 为 false",
+            !ShutdownService.ShouldAbortOnSkip(),
+            "为 true 会让每次跳过都白调一次 shutdown /a，并在日志里留下"
+          + "让人误以为失败的『撤销未生效』");
+
+        Check("未下发过关机时：SkipOnce 只记账、不撤销",
+            ShutdownService.SkipOnce(due) == ShutdownService.SkipOutcome.MarkedOnly,
+            "MarkedOnly 表示没有去动系统侧的关机；用户看到的是『本次跳过已生效』");
+
+        // 方向二：已经下发过 → 必须去撤销（真实时序：到点与点按钮撞在一起）
+        ShutdownService.NoteShutdownIssued();
+        Check("已下发过关机时：ShouldAbortOnSkip 为 true",
+            ShutdownService.ShouldAbortOnSkip(),
+            "为 false 会让『本次不关机』挡不住已发出的关机命令——"
+          + "用户以为取消了，机器还是关了");
+    }
+
+    /// <summary>
+    /// 退出码的显示格式。
+    ///
+    /// 【为什么值得单独钉】实机日志里出现过 -1073741502，
+    /// 十进制看不出任何含义；它其实是 0xC0000142（DLL 初始化失败），
+    /// 与上一批修的 shutdown.exe 启动失败是同一个系统状态码。
+    /// 负数按十六进制打印，排查时才能一眼对上号。
+    /// </summary>
+    private static void TestExitCodeFormatting()
+    {
+        Check("负数退出码按十六进制显示（-1073741502 → 0xC0000142）",
+            ShutdownService.DescribeExitCode(-1073741502) == "0xC0000142",
+            $"得到 {ShutdownService.DescribeExitCode(-1073741502)}");
+
+        Check("正数退出码保持十进制（1116 = 没有进行中的关机）",
+            ShutdownService.DescribeExitCode(1116) == "1116",
+            $"得到 {ShutdownService.DescribeExitCode(1116)}");
+
+        Check("零退出码原样（0 = 撤销成功）",
+            ShutdownService.DescribeExitCode(0) == "0",
+            $"得到 {ShutdownService.DescribeExitCode(0)}");
     }
 
     /// <summary>

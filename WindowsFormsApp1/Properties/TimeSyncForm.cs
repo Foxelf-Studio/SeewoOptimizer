@@ -897,16 +897,26 @@ namespace SeewoOpt
             }
             else
             {
-                // SkipOnce 内部会连带撤销任何已下发的系统关机倒计时
-                // （见其注释：只改内存标记挡不住已经发出去的关机命令）。
-                ShutdownService.SkipOnce(result.DueAt);
+                // SkipOnce 必要时会撤销已下发的关机（见其注释），
+                // 并如实返回它到底做了什么——日志据此措辞，不含糊。
+                ShutdownService.SkipOutcome outcome = ShutdownService.SkipOnce(result.DueAt);
 
                 // 区分两种"非确认"并分别记日志，便于日后排查用户到底做了什么。
                 // 行为上两者完全一致（都跳过），差别只在日志措辞。
                 string how = (choice == DialogResult.No)
                     ? "点了\"本次不关机\""
                     : $"关闭了提醒框（{choice}）";
-                WriteLog($"用户在提醒中{how}，已跳过本次并尝试撤销系统关机");
+
+                // 【措辞必须与实际动作一致——来自实机日志的修正】
+                // 早先这里一律写"并尝试撤销系统关机"。但在提醒阶段根本没下发过
+                // 任何关机命令（见 SystemCountdownSeconds：到点才发、且 /t 0），
+                // 于是每次跳过都在日志里留下"撤销未生效"，
+                // 用户读到"未生效"便合理怀疑是不是没取消成功，专门来问。
+                // 现在按 SkipOnce 的真实结果分成两种说法。
+                string tail = (outcome == ShutdownService.SkipOutcome.MarkedAndAbortAttempted)
+                    ? "，已尝试撤销系统关机"
+                    : "（此前未下发关机命令，无需撤销）";
+                WriteLog($"用户在提醒中{how}，已跳过本次{tail}");
 
                 if (trayIcon != null)
                 {
@@ -1159,9 +1169,16 @@ namespace SeewoOpt
         /// 若收到它之后进程还赖着不走，在 Windows 眼里仍然是
         /// "一个没退出的程序"——正是本次要消灭的那类现象。
         ///
-        /// 所以这里在会话确实要结束时主动 Close()，让 Application.Run 返回、
-        /// 走 Program.Shutdown 的正常收尾（日志写完、托盘图标摘掉），
-        /// 不留一个等着被系统强杀的进程。
+        /// 所以这里在会话确实要结束时主动 Close()，尽力走完
+        /// Program.Shutdown 的收尾（日志写完、托盘图标摘掉）。
+        ///
+        /// 【实测：这份"尽力"常常来不及——那也没关系】
+        /// 2026-10-11 实机日志（r16）里，收到 0x0016（wParam=1）之后
+        /// **没有**出现"主窗体运行结束"一行，说明系统在 Close 排到队之前
+        /// 就结束了本进程。这是正常且无害的：本程序没有需要落盘的脏状态，
+        /// 日志是同步写的（上面那几行会话消息本身就已经躺在日志里）。
+        /// 保留这段代码的意义是"我们从不拒绝退出"，
+        /// 而不是承诺一定能走完自己的收尾流程。
         ///
         /// 【为什么只在 wParam != 0 时才退】
         /// wParam = 0 的含义是"先前那次关机请求已被撤销、会话不结束"。

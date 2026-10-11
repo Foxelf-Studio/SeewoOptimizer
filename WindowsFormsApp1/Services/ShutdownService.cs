@@ -81,6 +81,27 @@ namespace SeewoOpt.Services
         private static DateTime _skipUntil = DateTime.MinValue;
 
         /// <summary>
+        /// 本进程是否**真的下发过**关机命令（<see cref="ExecuteShutdown"/> 成功后置位）。
+        ///
+        /// 【它回答的问题】用户点"本次不关机"时，系统侧到底有没有东西需要撤销。
+        ///
+        /// 【为什么必须由本进程记账，而不是"反正调一下 shutdown /a 也无害"】
+        /// 2026-10-11 实机日志暴露了"无害"的代价：跳过时无条件调一次
+        /// shutdown /a，在没有东西可撤时返回 1116，日志写下
+        /// 「撤销关机未生效」——用户看到"未生效"便合理怀疑没取消成功，
+        /// 专门来问是不是有缺陷。
+        ///
+        /// 日志是这套系统唯一的排查凭据（教室机器上没人会去调试它），
+        /// 所以"如实反映发生了什么"比"多调一次保险"更重要。
+        ///
+        /// 【为什么不在 ResetRuntimeState 里清零】
+        /// 那个方法用于"设置变更后重排"，而本标志表达的是"本进程曾经下发过
+        /// 一次关机"这一历史事实——设置变更不会让已发出的命令消失。
+        /// 保持为 true 是更安全的方向：之后的跳过仍会尝试撤销。
+        /// </summary>
+        private static bool _shutdownIssued = false;
+
+        /// <summary>
         /// 本轮已经"承诺"给用户的那次关机时刻——提醒框一弹出来就定下，
         /// 到点据此执行。DateTime.MinValue 表示当前没有承诺。
         ///
@@ -265,37 +286,93 @@ namespace SeewoOpt.Services
                                                now.Hour, now.Minute, 0, now.Kind);
         }
 
+        /// <summary>「本次不关机」实际做了什么，供调用方如实写日志。</summary>
+        public enum SkipOutcome
+        {
+            /// <summary>只记了跳过标记：本进程从未下发过关机命令，没有东西需要撤销。</summary>
+            MarkedOnly,
+
+            /// <summary>记了跳过标记，并尝试撤销系统侧进行中的关机。</summary>
+            MarkedAndAbortAttempted
+        }
+
         /// <summary>
         /// 用户选择了"本次不关机"：把这一次的关机时刻记下来，本次不再触发，
-        /// 并**顺手撤销任何已经下发的系统关机倒计时**。
+        /// 必要时撤销已下发的系统关机。
         /// 下一天（或下一个命中日）的同一时间仍会正常提醒与执行。
         ///
-        /// 【为什么要在这里调 AbortShutdown——这是个真实存在的洞】
+        /// 【为什么要记账而不是只改内存标记——这是个真实存在的洞】
         /// 早先 SkipOnce 只写一个内存标记，假设"取消发生在关机命令下发之前"。
         /// 但实机截图里出现过这一幕：日志区显示"已下达关机命令"，
         /// 同时系统的"您将要被注销"框已经弹出来——说明关机命令已经发出，
         /// 此时只改内存标记，**系统那边的倒计时照样会走完并关机**。
         /// 用户以为点了"本次不关机"就没事了，结果电脑还是关了。
         ///
-        /// 现在把它做成"记账 + 撤销"的原子动作：只要用户选了不关机，
-        /// 就尽最大努力让系统那边真的停下来。
-        /// 在 /t 0 的设计下通常已无可撤之物（shutdown /a 返回非 0），
-        /// 那属于"本来就没有进行中的关机"，正是我们想要的结果；
-        /// 真遇到残留倒计时时，这一步才是唯一能救命的地方。
+        /// 【为什么现在大多不需要撤销——2026-10-11 实机日志带来的修正】
+        /// /t 0 的设计下，提醒框弹出的那一刻**不会**下发任何关机命令
+        /// （见 SystemCountdownSeconds 的注释），命令只在到点时才发。
+        /// 因此"在提醒里点本次不关机"这个最常见的动作发生时，
+        /// 系统侧本来就没有可撤之物。
+        ///
+        /// 早先这里无条件下调 AbortShutdown，于是每次跳过都会在日志里留下
+        /// "撤销关机未生效（退出码 1116）"——用户看到「未生效」三个字，
+        /// 合理地怀疑是不是没取消成功。实机日志确认了这个误解。
+        ///
+        /// 因此改为**只撤销本进程真的下发过的那一次**：
+        ///   · 没下发过 → 不调 shutdown /a，日志直说"无需撤销"；
+        ///   · 下发过   → 仍然尽力撤销，这才是那条防线真正存在的意义
+        ///                （例如极端时序：到点那一刻与点"本次不关机"撞在一起）。
+        ///
+        /// 【为什么不撤销"别人发起的关机"】
+        /// 老师从开始菜单关机的动作不该被我们取消——那是他的意图。
+        /// 系统发起的关机由 ShutdownWarningDialog.ClosedBySessionEnd 处理，
+        /// 调用方在那条路径上根本不会走到这里。
         /// </summary>
-        public static void SkipOnce(DateTime dueAt)
+        public static SkipOutcome SkipOnce(DateTime dueAt)
         {
             _skipUntil = new DateTime(dueAt.Year, dueAt.Month, dueAt.Day,
                                       dueAt.Hour, dueAt.Minute, 0, dueAt.Kind);
             LogService.Write($"用户选择本次不关机，跳过 {_skipUntil:yyyy-MM-dd HH:mm} 这一次");
 
-            // 撤销可能已经下发的关机命令（无进行中任务时静默通过）。
-            // 失败不阻断流程——标记已写入，至少保证本程序不会再补一刀。
+            if (!ShouldAbortOnSkip())
+            {
+                // 最常见的情形：在提前 5 分钟的提醒框里点的。
+                // 那时命令还没下发，所以"没有需要撤销的系统关机"是**正常且正确**的。
+                LogService.Write("尚未下发过关机命令，无需撤销（本次跳过已生效）");
+                return SkipOutcome.MarkedOnly;
+            }
+
+            // 已经下发过（极端时序，或将来改回带倒计时的设计）：
+            // 尽力让系统那边真的停下来。失败不阻断——标记已写入，
+            // 至少保证本程序不会再补一刀。
             string abortError;
-            if (AbortShutdown(out abortError))
-                LogService.Write("已确认系统侧无进行中的关机任务");
-            else
-                LogService.Write($"尝试撤销系统关机失败：{abortError}（本次跳过标记已生效）");
+            if (!AbortShutdown(out abortError))
+                LogService.Write($"撤销未确认成功：{abortError}（本次跳过标记已生效）");
+
+            return SkipOutcome.MarkedAndAbortAttempted;
+        }
+
+        /// <summary>
+        /// 跳过时是否需要去撤销系统侧的关机——即本进程是否真的下发过。
+        ///
+        /// 单独抽成方法而不是内联那个字段，是为了让单元测试能直接盯着
+        /// **这条决策**：测试没法调 ExecuteShutdown（那会真的把关机发出去），
+        /// 但可以调 NoteShutdownIssued 模拟"已下发"，再看这里的判断是否翻转。
+        /// </summary>
+        internal static bool ShouldAbortOnSkip()
+        {
+            return _shutdownIssued;
+        }
+
+        /// <summary>
+        /// 记下"本进程已下发过一次关机命令"。
+        ///
+        /// 由 <see cref="ExecuteShutdown"/> 成功后调用；测试也用它模拟该状态
+        /// （唯一区别是测试不会真的执行关机）。
+        /// </summary>
+        internal static void NoteShutdownIssued()
+        {
+            _shutdownIssued = true;
         }
 
         /// <summary>
@@ -392,6 +469,10 @@ namespace SeewoOpt.Services
                     string.Format("/s /t {0}", SystemCountdownSeconds));
 
                 System.Diagnostics.Process.Start(psi);
+
+                // 记账：之后的"本次不关机"才知道系统侧确有东西可撤。
+                NoteShutdownIssued();
+
                 LogService.Write(SystemCountdownSeconds > 0
                     ? $"已下发关机命令（{psi.FileName}），系统倒计时 {SystemCountdownSeconds} 秒"
                     : $"已下发关机命令（{psi.FileName}），立即执行（系统倒计时 0 秒）");
@@ -414,13 +495,16 @@ namespace SeewoOpt.Services
         /// 关机命令一下发就立即执行，**几乎没有可撤销的窗口**。
         ///
         /// 那这个方法还有什么用？——两处真实用途：
-        ///   1. 防御性撤销：万一将来把倒计时改回非 0（或系统策略强制加缓冲），
-        ///      "本次不关机"必须仍能真正拦住关机，而不是只改一个内存标记；
-        ///   2. 清理历史残留：上一次运行若在倒计时中途被杀进程，
-        ///      系统里可能还挂着一个待执行的关机任务，开机后应能清掉。
+        ///   1. 防御性撤销：极端时序下"本次不关机"与"到点下发命令"撞在一起时，
+        ///      必须仍能尽力拦住，而不是只改一个内存标记；
+        ///   2. 将来若把倒计时改回非 0（或系统策略强制加缓冲），
+        ///      这一步是唯一能救命的地方。
         ///
-        /// 调用它是安全的：没有进行中的关机时，shutdown.exe 返回非 0
-        /// 且不产生任何副作用，我们只是静默记一条日志。
+        /// 由 <see cref="SkipOnce"/> 调用，且只在<see cref="ShouldAbortOnSkip"/>
+        /// 为真（本进程确实下发过）时才调——没下发过就别去调，
+        /// 那只会往日志里写一条让人误以为失败的记录。详见 SkipOnce 的注释。
+        ///
+        /// 调用它是安全的：没有进行中的关机时不产生任何副作用。
         /// </summary>
         public static bool AbortShutdown(out string error)
         {
@@ -436,7 +520,6 @@ namespace SeewoOpt.Services
                 using (var p = System.Diagnostics.Process.Start(psi))
                 {
                     // 【为什么要等它退出并读 ExitCode】
-                    // shutdown /a 在没有进行中的关机时返回非 0（通常 1116）。
                     // 不等它结束就直接报"撤销成功"是在骗人——
                     // 必须拿到真实的退出码，才能判断到底撤掉没有。
                     if (p != null && !p.WaitForExit(5000))
@@ -447,17 +530,28 @@ namespace SeewoOpt.Services
                     }
 
                     int code = (p != null && p.HasExited) ? p.ExitCode : -1;
+
                     if (code == 0)
                     {
-                        LogService.Write("已撤销系统关机倒计时（系统确认成功）");
+                        LogService.Write("已撤销系统侧的关机倒计时");
                         return true;
                     }
 
-                    // 非 0：多半是"当前没有进行中的关机"。这不是错误，
-                    // 只是说明没有东西可撤——对调用方而言结果一样（机器不会关）。
-                    LogService.Write($"撤销关机未生效（shutdown /a 退出码 {code}，"
-                                   + "通常表示当前没有进行中的关机）");
-                    return true;
+                    if (code == ERROR_NO_SHUTDOWN_IN_PROGRESS)
+                    {
+                        // 【措辞修正，来自实机日志】
+                        // 这里原先写"撤销关机未生效"，用户看到"未生效"就以为
+                        // 取消失败了。它的真实含义是"本来就没有进行中的关机"——
+                        // 对我们而言恰恰是好消息：机器不会关。
+                        LogService.Write("系统侧没有进行中的关机任务，无需撤销");
+                        return true;
+                    }
+
+                    // 其余退出码：可能是真失败，也可能只是没东西可撤。
+                    // 如实记下原始码（负数按十六进制打印，便于和
+                    // 0xC0000142 这类系统状态码对照），不替用户下结论。
+                    LogService.Write($"撤销关机命令返回退出码 {DescribeExitCode(code)}，未确认成功");
+                    return false;
                 }
             }
             catch (Exception ex)
@@ -466,6 +560,24 @@ namespace SeewoOpt.Services
                 LogService.Write($"撤销关机失败：{ex.Message}");
                 return false;
             }
+        }
+
+        /// <summary>
+        /// 没有进行中的关机任务时 shutdown.exe 的退出码
+        /// （ERROR_NO_SHUTDOWN_IN_PROGRESS）。实机日志里大量出现，属正常。
+        /// </summary>
+        private const int ERROR_NO_SHUTDOWN_IN_PROGRESS = 1116;
+
+        /// <summary>
+        /// 把退出码写成便于对照的形式：负数（常见于进程根本没起来）按
+        /// 十六进制输出。例如 -1073741502 → 0xC0000142（DLL 初始化失败），
+        /// 一眼就能和系统状态码对上；只印十进制则会让人一头雾水。
+        /// </summary>
+        internal static string DescribeExitCode(int code)
+        {
+            return code < 0
+                ? string.Format("0x{0:X8}", unchecked((uint)code))
+                : code.ToString();
         }
 
         /// <summary>清空内存中的记账状态（用于"重新同步"或设置变更后重排）</summary>
