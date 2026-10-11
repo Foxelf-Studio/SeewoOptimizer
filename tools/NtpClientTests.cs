@@ -90,6 +90,11 @@ internal static class NtpClientTests
         TestGuardedDaysIgnoresTimeOfDay();
         TestFirstRunDateTrust();
 
+        // --- 升级迁移（老用户补勾"启动时自动执行"，新用户保持默认）---
+        TestAutoStartUpgradeIdempotent();
+        TestAutoStartUpgradeForLegacyUser();
+        TestAutoStartUpgradeForFreshInstall();
+
         // --- 设置规整（注册表可手改，界面限不住）---
         TestSettingsNormalizeClampsRuleCount();
 
@@ -1935,6 +1940,97 @@ internal static class NtpClientTests
         Check($"留证：以 2000-01-01 为起点会算出 {bogusDays} 天（实机截图显示 9781）",
             bogusDays == 9780,
             $"得到 {bogusDays}｜旧公式 +1 正是截图里的 9781");
+    }
+
+    // ---------------------------------------------------------------
+    // 升级迁移：从旧版本升级上来的用户，要补勾"程序启动时自动开始执行既定任务"
+    //
+    // 【为什么这一组必须存在】
+    // 判定依赖"注册表设置键是否存在"，而这个事实只在**第一次启动**时成立：
+    // 全新安装第一次启动后，程序自己会把键建起来（保存设置、记录守护起始日）。
+    // 于是最容易写错的不是三种判定本身，而是"忘记给全新安装落标记"——
+    // 那样第二次启动就会被判成"老用户"，替新用户把选项勾上。
+    // 这个错误第一次测试永远是好的，只有隔一次启动才暴露，
+    // 所以必须用测试把"落标记"这条义务钉死。
+    // ---------------------------------------------------------------
+
+    /// <summary>已处理过的安装：不再重复处理（幂等），也无需再写标记。</summary>
+    private static void TestAutoStartUpgradeIdempotent()
+    {
+        SeewoOpt.Services.AutoStartTaskUpgradeVerdict verdict =
+            SeewoOpt.Services.AutoStartTaskUpgradePolicy.Judge(
+                markerPresent: true, settingsKeyExists: true);
+
+        Check("迁移标记已存在时不重复处理",
+            verdict == SeewoOpt.Services.AutoStartTaskUpgradeVerdict.AlreadyApplied,
+            $"得到 {verdict}");
+
+        Check("已处理过时不再写标记（否则每次启动都写注册表）",
+            !SeewoOpt.Services.AutoStartTaskUpgradePolicy.ShouldWriteMarker(verdict),
+            "得到 true");
+    }
+
+    /// <summary>老用户升级：键存在且无标记 → 补勾；处理完成后不再重复。</summary>
+    private static void TestAutoStartUpgradeForLegacyUser()
+    {
+        SeewoOpt.Services.AutoStartTaskUpgradeVerdict verdict =
+            SeewoOpt.Services.AutoStartTaskUpgradePolicy.Judge(
+                markerPresent: false, settingsKeyExists: true);
+
+        Check("注册表里已有设置且无迁移标记 → 判为老用户升级",
+            verdict == SeewoOpt.Services.AutoStartTaskUpgradeVerdict.EnableForUpgrade,
+            $"得到 {verdict}");
+
+        Check("老用户升级时要补勾\"启动时自动执行\"",
+            SeewoOpt.Services.AutoStartTaskUpgradePolicy.ShouldEnableAutoStartTask(verdict),
+            "得到 false（老用户升级后不会自动勾选）");
+
+        Check("老用户升级同样要落标记（否则每次启动都重复补勾）",
+            SeewoOpt.Services.AutoStartTaskUpgradePolicy.ShouldWriteMarker(verdict),
+            "得到 false");
+
+        // 处理完成后的闭环：第二次启动必须是"已处理"
+        SeewoOpt.Services.AutoStartTaskUpgradeVerdict second =
+            SeewoOpt.Services.AutoStartTaskUpgradePolicy.Judge(
+                markerPresent: true, settingsKeyExists: true);
+        Check("老用户升级处理完成后，下次启动不再重复",
+            second == SeewoOpt.Services.AutoStartTaskUpgradeVerdict.AlreadyApplied,
+            $"得到 {second}");
+    }
+
+    /// <summary>
+    /// 全新安装：不替用户做决定（保持默认不勾），
+    /// 但**必须**落标记——否则第二次启动会被误判成老用户。
+    /// </summary>
+    private static void TestAutoStartUpgradeForFreshInstall()
+    {
+        SeewoOpt.Services.AutoStartTaskUpgradeVerdict verdict =
+            SeewoOpt.Services.AutoStartTaskUpgradePolicy.Judge(
+                markerPresent: false, settingsKeyExists: false);
+
+        Check("注册表里没有设置 → 判为全新安装",
+            verdict == SeewoOpt.Services.AutoStartTaskUpgradeVerdict.KeepDefaultForNewInstall,
+            $"得到 {verdict}");
+
+        Check("全新安装不补勾（保持默认不勾选）",
+            !SeewoOpt.Services.AutoStartTaskUpgradePolicy.ShouldEnableAutoStartTask(verdict),
+            "得到 true（替新用户做了主）");
+
+        // 【本组最关键的一条】全新安装也必须落标记。
+        // 漏了它，第二次启动就是"键存在 + 无标记" → 判成老用户 → 自动勾选。
+        Check("全新安装也必须落标记（否则第二次启动会被误判成老用户）",
+            SeewoOpt.Services.AutoStartTaskUpgradePolicy.ShouldWriteMarker(verdict),
+            "得到 false——这正是\"第二次启动被误判\"的成因");
+
+        // 两次启动的完整推演：第一次（无键）→ 按判定落标记 → 第二次（有键）
+        bool markerAfterFirstRun = SeewoOpt.Services.AutoStartTaskUpgradePolicy
+            .ShouldWriteMarker(verdict);
+        SeewoOpt.Services.AutoStartTaskUpgradeVerdict second =
+            SeewoOpt.Services.AutoStartTaskUpgradePolicy.Judge(
+                markerPresent: markerAfterFirstRun, settingsKeyExists: true);
+        Check("推演：全新安装第二次启动仍判为\"已处理\"，不会补勾",
+            second == SeewoOpt.Services.AutoStartTaskUpgradeVerdict.AlreadyApplied,
+            $"得到 {second}（新用户被误判成老用户）");
     }
 
     /// <summary>

@@ -40,6 +40,7 @@
       这条断言，测的必须是产品真正用的那份判断。
     -->
     <Compile Include="..\WindowsFormsApp1\Services\GuardDayPolicy.cs" />
+    <Compile Include="..\WindowsFormsApp1\Services\AutoStartTaskUpgradePolicy.cs" />
     <!--
       ShutdownService 本身（不只是它的纯逻辑）也要编进来。
       原因：本轮把"到点关机"的判定从"每轮从规则实时推导"改成了

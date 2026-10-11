@@ -236,3 +236,17 @@ jobs:
             Write-Error "更新脚本探针未通过：自动更新可能在最后一步失败"
             exit 1
           }
+
+      # 【为什么这个探针必须进 CI】
+      # 升级迁移（老用户补勾"启动时自动执行"）最隐蔽的错误不在判定函数里，
+      # 而在注册表这一层：**全新安装漏写标记**时，第一次启动判定是对的、
+      # 只有第二次启动才会把新用户误判成老用户。纯策略测试盖不住这一层，
+      # 只能真的读写一次注册表。探针自带备份/恢复，跑完不留痕迹。
+      - name: 运行升级迁移探针（真实注册表全生命周期）
+        shell: pwsh
+        run: |
+          dotnet run --project tools\UpgradeMigrationProbe.csproj -c Release
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "升级迁移探针未通过：老用户可能不会自动勾选，或新用户被误判成老用户"
+            exit 1
+          }

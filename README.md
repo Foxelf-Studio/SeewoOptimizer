@@ -259,7 +259,8 @@ SeewoOptimizer/
 │   ├── NtpClientTests.cs(.csproj)      # 单元测试：NTP 协议 / 关机调度 / 守护天数 / 设置序列化
 │   ├── DialogRender.cs(.csproj)        # 把关机提醒框渲染成 PNG，供人眼核对
 │   ├── ShutdownSessionProbe.cs(.csproj) # 关机/注销链路探针：真实收发窗口消息
-│   └── UpdateLaunchProbe.cs(.csproj)   # 更新链路的替换演练：真实模板 + 真实进程
+│   ├── UpdateLaunchProbe.cs(.csproj)   # 更新链路的替换演练：真实模板 + 真实进程
+│   └── UpgradeMigrationProbe.cs(.csproj) # 升级迁移探针：真实注册表全生命周期（自带备份/恢复）
 └── .github/workflows/build.yml  # CI：编译校验 + 跑单元测试
 ```
 
@@ -307,6 +308,7 @@ dotnet run --project NtpClientTests.csproj        # 单元测试，输出"通过
 dotnet run --project ShutdownSessionProbe.csproj  # 关机链路探针，退出码 0=通过
 dotnet run --project DialogRender.csproj          # 渲染提醒框 PNG 到 bin/Release/net48/render/
 dotnet run --project UpdateLaunchProbe.csproj     # 更新替换演练，退出码 0=通过
+dotnet run --project UpgradeMigrationProbe.csproj # 升级迁移演练（真实注册表，可回滚）
 ```
 
 **关于 `ShutdownSessionProbe`**：它验证的是"窗口消息层"的行为——
@@ -314,6 +316,12 @@ dotnet run --project UpdateLaunchProbe.csproj     # 更新替换演练，退出�
 这类缺陷不存在于任何纯函数里，单元测试测不到，只能用真实窗体 + 真实
 `SendMessage`（投递 `WM_QUERYENDSESSION` / `WM_SYSCOMMAND(SC_CLOSE)`）
 直接读回窗口过程的返回值。探针以退出码报告结果，可直接接进自动化。
+
+**关于 `UpgradeMigrationProbe`**：升级迁移的正确性取决于"用户机器上到底
+有没有旧版本的设置键"，这是纯逻辑测不出来的。它在临时键上跑一遍完整
+生命周期——伪造旧版安装 → 跑迁移 → 校验结果 → 删除临时键，涵盖
+"老用户被补勾"与"全新安装不被误判"两条路径，结束时**必定清理**，
+不会在运行 CI 的机器上留下残留。
 
 > **注意**：CI 只做编译校验，不发布产物——发布需要对 exe 用本机私钥签名，
 > 而私钥绝不能上传到云端。

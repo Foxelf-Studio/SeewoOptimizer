@@ -32,6 +32,11 @@ namespace SeewoOpt.Services
         /// 【默认 false】用户明确要求"启动时不再默认自动执行"——
         /// 空教室的一体机被远程唤醒或课间重启时，不该自己动起来。
         /// 这条默认值本身就是需求的一部分，不要"顺手"改成 true。
+        ///
+        /// 【唯一的例外：老用户升级】v26.6.9 及以前没有这个开关（启动后
+        /// 无条件自动同步），升级上来的人要由一次性迁移替他补勾，
+        /// 见 <see cref="AutoStartTaskUpgradePolicy"/>。
+        /// 迁移只对"注册表里已有设置"的机器生效，全新安装始终不勾。
         /// </summary>
         public bool AutoStartTask { get; set; }
 
@@ -79,7 +84,10 @@ namespace SeewoOpt.Services
                 AutoVolume = true,
                 VolumeLevel = 60,
                 KillWps = true,
-                AutoStartTask = false,          // 需求：启动时不默认自动执行
+                // 需求：启动时不默认自动执行。
+                // 老用户升级时由一次性迁移补勾（AutoStartTaskUpgradePolicy），
+                // 全新安装保持这里的 false。
+                AutoStartTask = false,
                 FirstRunDate = DateTime.MinValue,
                 // -1 = 尚无已确认的守护天数（界面保留"正在确认..."占位）
                 LastKnownGuardedDays = -1,
@@ -256,6 +264,77 @@ namespace SeewoOpt.Services
             {
                 if (key != null)
                     key.DeleteSubKeyTree("TimeSyncTool", false);
+            }
+        }
+
+        /// <summary>
+        /// 判定"升级迁移"该怎么处理：读注册表，**不写**。
+        ///
+        /// 判定规则与理由见 <see cref="AutoStartTaskUpgradePolicy"/>。
+        /// 这里只负责把注册表的事实（键是否存在、标记是否存在）喂给纯策略。
+        /// </summary>
+        public static AutoStartTaskUpgradeVerdict DetectAutoStartTaskUpgrade()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(REGISTRY_PATH))
+                {
+                    if (key == null)
+                    {
+                        // 读不到设置键 = 全新安装。
+                        // （新版 Load 用 OpenSubKey，不会创建键；旧版用 CreateSubKey，
+                        //   跑过就一定有——这正是能把两者区分开的原因。）
+                        return AutoStartTaskUpgradePolicy.Judge(false, false);
+                    }
+
+                    object marker = key.GetValue(AutoStartTaskUpgradePolicy.MarkerValueName);
+                    return AutoStartTaskUpgradePolicy.Judge(marker != null, true);
+                }
+            }
+            catch (Exception ex)
+            {
+                // 连注册表都读不了时**什么都不做**。
+                // 迁移的本质是"往用户设置里写东西"，读不可靠就不该写——
+                // 宁可少补勾一次，不可写错。返回 AlreadyApplied 即"不处理"。
+                LogService.Write($"升级迁移判定失败，本次不处理：{ex.Message}");
+                return AutoStartTaskUpgradeVerdict.AlreadyApplied;
+            }
+        }
+
+        /// <summary>
+        /// 落账升级迁移：只动两个值——迁移标记（必须写），
+        /// 以及需要时把 AutoStartTask 写为 true。返回是否写入成功。
+        ///
+        /// 【为什么是定点写入，而不是构造一份 AppSettings 走 Save()】
+        /// Save() 会把全部设置项写一遍。若此刻 Load 曾因异常返回过默认值，
+        /// 一次 Save 就会把用户原有设置整体覆盖成默认——为了写一个标记
+        /// 而冒这个险不值得。这里只碰与本次迁移有关的两个值。
+        ///
+        /// 【失败时返回 false 而不抛】调用方要据此如实记日志
+        /// （"已自动勾选"与"勾选没能写进注册表"必须能分辨），
+        /// 但写失败不该让程序启动失败——下次启动标记还在，会自然重试。
+        /// </summary>
+        public static bool TryApplyAutoStartTaskUpgrade(AutoStartTaskUpgradeVerdict verdict)
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(REGISTRY_PATH))
+                {
+                    if (AutoStartTaskUpgradePolicy.ShouldEnableAutoStartTask(verdict))
+                        key.SetValue("AutoStartTask", true);
+
+                    // 除"已处理过"外一律写标记（含全新安装）——
+                    // 漏写会让新用户第二次启动被误判成老用户，见策略类注释。
+                    if (AutoStartTaskUpgradePolicy.ShouldWriteMarker(verdict))
+                        key.SetValue(AutoStartTaskUpgradePolicy.MarkerValueName, 1);
+
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogService.Write($"写入升级迁移结果失败：{ex.Message}");
+                return false;
             }
         }
 

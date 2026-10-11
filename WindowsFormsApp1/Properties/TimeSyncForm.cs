@@ -313,6 +313,15 @@ namespace SeewoOpt
                 // 从当前 exe 文件加载图标作为窗体图标（任务栏图标）
                 this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
                 LoadSettings();
+
+                // 【升级迁移：位置很关键，必须在其余初始化之前】
+                //
+                // 这里是"已读到设置、还没写任何东西"的唯一时点。
+                // 判断"老用户升级还是全新安装"依赖注册表设置键在**第一次写之前**
+                // 是否已存在；一旦挪到 Load 事件里就晚了——那之前程序自己
+                // 可能已经把键建起来（例如保存设置），全新安装会被误判成老用户。
+                ApplyUpgradeMigrationIfNeeded();
+
                 SetupForm();
                 InitializeTrayIcon();
                 this.Load += TimeSyncForm_Load;
@@ -1908,6 +1917,55 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
             _autoStartTask = settings.AutoStartTask;
             _firstRunDate = settings.FirstRunDate;
             _shutdownRules = settings.ShutdownRules ?? new List<ShutdownTimeRule>();
+        }
+
+        /// <summary>
+        /// 一次性升级迁移：从旧版本升级上来的用户，替他补勾
+        /// "程序启动时自动开始执行既定任务"；全新安装保持默认不勾。
+        ///
+        /// 【为什么要有这个】
+        /// v26.6.9 及以前没有这个开关，程序启动 2 秒后无条件自动同步。
+        /// 新版改成默认不勾后，老用户升级上来会发现"程序不干活了"。
+        /// 判定与陷阱的完整说明见 <see cref="AutoStartTaskUpgradePolicy"/>。
+        ///
+        /// 【只做一次】处理完即写注册表标记；标记存在时直接返回，
+        /// 用户以后手动取消勾选也不会被再次改回去。
+        ///
+        /// 【为什么在这里改 _autoStartTask 而不是只写注册表】
+        /// 界面（设置窗体）与启动决策（Load 事件里的 2 秒延时自动开始）
+        /// 读的都是这个字段，同步改内存才能当场生效；注册表写盘则保证
+        /// 下次启动仍然如此。两边都改，缺一不可。
+        /// </summary>
+        private void ApplyUpgradeMigrationIfNeeded()
+        {
+            try
+            {
+                AutoStartTaskUpgradeVerdict verdict =
+                    SettingsStore.DetectAutoStartTaskUpgrade();
+
+                // 已处理过：完全静默，不写日志刷屏（每次启动都会走到这里）
+                if (verdict == AutoStartTaskUpgradeVerdict.AlreadyApplied) return;
+
+                bool written = SettingsStore.TryApplyAutoStartTaskUpgrade(verdict);
+                string tail = written ? "" : "（注册表写入失败，下次启动会重试）";
+
+                if (AutoStartTaskUpgradePolicy.ShouldEnableAutoStartTask(verdict))
+                {
+                    _autoStartTask = true;
+                    WriteLog("检测到从旧版本升级（注册表里已有设置），"
+                             + "已自动勾选\"程序启动时自动开始执行既定任务\"" + tail);
+                }
+                else
+                {
+                    WriteLog("全新安装（注册表里没有设置），"
+                             + "\"程序启动时自动开始执行既定任务\"保持默认不勾选" + tail);
+                }
+            }
+            catch (Exception ex)
+            {
+                // 迁移失败不能拖垮启动：最多是这一次没补勾，下次启动会重来
+                WriteLog($"升级迁移处理失败：{ex}");
+            }
         }
 
         public void SaveSettings()

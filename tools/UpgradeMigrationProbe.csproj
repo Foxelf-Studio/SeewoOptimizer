@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AssemblyName>UpgradeMigrationProbe</AssemblyName>
+    <RootNamespace>SeewoOpt.Tools</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <LangVersion>7.3</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      升级迁移探针。
+
+      【为什么必须有它】
+      这次迁移（老用户补勾"启动时自动执行"）的判定逻辑本身很简单，
+      纯策略测试已经盖住了。真正难测、也最容易错的是**注册表这一层**：
+        · 读标记与写标记必须用同一个值名；
+        · 全新安装也必须把标记写进注册表——漏了它，**第二次启动**才会
+          暴露（第一次启动时键还不存在，判定是对的，测试全绿）。
+      所以探针不模拟、不复刻，直接用产品源码在**真实注册表**上把
+      "全新安装 → 第二次启动 → 老用户升级 → 再启动"整条生命周期走一遍。
+
+      【安全：全程可回滚】
+      运行前备份 HKCU\Software\TimeSyncTool 的全部值，结束时原样恢复；
+      原本不存在则删除键。无论断言失败还是中途异常，都在 finally 里恢复。
+
+      【链接真实源码】
+      SettingsStore.cs 与 AutoStartTaskUpgradePolicy.cs 都是产品同一份文件。
+      在探针里复刻一份"看起来一样"的读写，就是假测试（本项目已多次确认）。
+    -->
+    <Compile Include="UpgradeMigrationProbe.cs" />
+    <Compile Include="..\WindowsFormsApp1\Services\SettingsStore.cs" />
+    <Compile Include="..\WindowsFormsApp1\Services\AutoStartTaskUpgradePolicy.cs" />
+    <Compile Include="..\WindowsFormsApp1\Services\ShutdownSchedule.cs" />
+    <Compile Include="..\WindowsFormsApp1\Services\LogService.cs" />
+  </ItemGroup>
+</Project>

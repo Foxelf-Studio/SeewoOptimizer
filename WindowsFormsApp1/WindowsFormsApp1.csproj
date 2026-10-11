@@ -76,6 +76,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Services\AutoStartService.cs" />
+    <Compile Include="Services\AutoStartTaskUpgradePolicy.cs" />
     <Compile Include="Services\BuildInfo.cs" />
     <Compile Include="Services\GuardDayPolicy.cs" />
     <Compile Include="Services\LogService.cs" />
