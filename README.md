@@ -34,7 +34,8 @@
 
 ## 🖼️ 界面预览
 
-<img width="797" height="602" alt="image" src="https://github.com/user-attachments/assets/4ccf77f0-20cd-4ed8-9bb5-db648014afb1" />
+<img width="902" height="603" alt="image" src="https://github.com/user-attachments/assets/eb8472c0-d447-49ef-b3aa-f8ab705af9ac" />
+
 
 - 主窗口实时显示同步日志
 - 右下角按钮支持：重新同步、显示窗口、隐藏到托盘、GitHub仓库、卸载程序
@@ -57,7 +58,8 @@
 ### 2. 设置选项
 点击菜单栏 **文件 → 设置** 打开设置窗口：
 
-<img width="236" height="175" alt="image" src="https://github.com/user-attachments/assets/71c1cb0d-7a74-4fac-bee4-491a538928a8" />
+<img width="666" height="661" alt="image" src="https://github.com/user-attachments/assets/b540bb74-806d-47de-8b76-c4aa9c2d5045" />
+
 
 | 选项 | 说明 |
 |------|------|
