@@ -256,9 +256,10 @@ SeewoOptimizer/
 │   ├── build.cmd                # 同步 + 编译
 │   ├── publish.cmd              # 同步 + 编译 + 签名 + 公钥自检
 │   ├── Directory.Build.props    # 让各工具工程各用独立 obj（避免相互覆盖）
-│   ├── NtpClientTests.cs(.csproj)      # 单元测试：NTP 协议 / 关机调度 / 设置序列化
+│   ├── NtpClientTests.cs(.csproj)      # 单元测试：NTP 协议 / 关机调度 / 守护天数 / 设置序列化
 │   ├── DialogRender.cs(.csproj)        # 把关机提醒框渲染成 PNG，供人眼核对
-│   └── ShutdownSessionProbe.cs(.csproj) # 关机/注销链路探针：真实收发窗口消息
+│   ├── ShutdownSessionProbe.cs(.csproj) # 关机/注销链路探针：真实收发窗口消息
+│   └── UpdateLaunchProbe.cs(.csproj)   # 更新链路的替换演练：真实模板 + 真实进程
 └── .github/workflows/build.yml  # CI：编译校验 + 跑单元测试
 ```
 
@@ -305,6 +306,7 @@ cd tools
 dotnet run --project NtpClientTests.csproj        # 单元测试，输出"通过 N 项，失败 M 项"
 dotnet run --project ShutdownSessionProbe.csproj  # 关机链路探针，退出码 0=通过
 dotnet run --project DialogRender.csproj          # 渲染提醒框 PNG 到 bin/Release/net48/render/
+dotnet run --project UpdateLaunchProbe.csproj     # 更新替换演练，退出码 0=通过
 ```
 
 **关于 `ShutdownSessionProbe`**：它验证的是"窗口消息层"的行为——

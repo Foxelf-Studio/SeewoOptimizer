@@ -255,7 +255,16 @@ namespace SeewoOpt
             }
             catch (Exception ex)
             {
-                WriteLog($"释放互斥体时出错：{ex.Message}");
+                // 【这不是故障，别报成故障】
+                // 更新流程跑在后台线程上，而 Mutex 只能由**获取它的那个线程**释放，
+                // 跨线程调用会抛"Object synchronization method was called from an
+                // unsynchronized block of code"。实机日志里那行看着像出错，
+                // 其实无害：进程退出时 Windows 会自动放弃未释放的互斥体，
+                // 单实例保护不会因此失效（紧随其后的就是 Environment.Exit）。
+                //
+                // 措辞如实说明"由谁释放"，避免下次排查又被这行吓一跳。
+                WriteLog($"互斥体未在本线程释放（{ex.Message}）；"
+                       + "进程退出时由系统自动释放，不影响单实例保护");
             }
         }
 
@@ -506,10 +515,16 @@ namespace SeewoOpt
                 }
                 catch (Exception ex)
                 {
-                    WriteLog($"下载失败 (尝试 {retry + 1}/{maxRetries}): {ex.Message}");
+                    // 【措辞修正，来自实机日志】
+                    // 这个方法包住的是"下载 → 验签 → 校验哈希 → 生成并启动更新脚本"
+                    // 整条链路，任何一步失败都会走到这里。原来一律写"下载失败"，
+                    // 而实机日志里明明已经出现"下载进度 100% / 签名校验有效 /
+                    // 哈希与发布说明一致"，紧接着却是一行"下载失败"——
+                    // 排查方向被完全带偏（那次真正失败的是启动脚本）。
+                    WriteLog($"更新失败（第 {retry + 1}/{maxRetries} 次尝试）: {ex.Message}");
                     if (retry == maxRetries - 1)
                     {
-                        WriteLog($"下载最终失败，无法更新");
+                        WriteLog("更新最终失败，程序保持原版本继续运行（未做任何改动）");
                         return false;
                     }
                     else
@@ -619,16 +634,29 @@ namespace SeewoOpt
                     : $"哈希与发布说明不一致（说明: {expectedHash}）——签名有效，不影响更新");
             }
 
-            CreateUpdateScript(updaterScript, currentExe, downloadedFile, newVersion);
-            WriteLog("更新脚本创建成功，准备退出主程序，由更新脚本完成后台替换");
+            // 【只创建一次】原先这里调用了两次 CreateUpdateScript：
+            // 第一次只为写脚本、记日志，第二次重新写一遍并把 psi 返回去启动。
+            // 后果是每次尝试的日志里都出现两遍"更新脚本已创建"，
+            // 排查时看起来像"脚本被创建了两份/重试了两次"，极具误导性
+            // （2026-10-11 的实机日志正是这样）。
+            ProcessStartInfo updateProcess = CreateUpdateScript(
+                updaterScript, currentExe, downloadedFile, newVersion);
 
-            // Environment.Exit 不会执行 finally，必须在此显式释放互斥体，
-            // 否则批处理脚本里的 taskkill 可能杀不掉本进程，导致文件被占用而替换失败
+            // 先启动脚本，再退出本进程：脚本开头有 3 次 ping 的等待，
+            // 足够主程序退出并把 exe 的文件占用让出来。
+            Process.Start(updateProcess);
+            WriteLog("更新脚本已启动，主程序即将退出，由脚本完成后台替换");
+
+            // Environment.Exit 不会执行 finally，这里显式释放一次互斥体。
+            //
+            // 【更正一条原来写错的理由】原注释说"不释放互斥体，
+            // 批处理里的 taskkill 可能杀不掉本进程"——那是错的：
+            // 持有互斥体与能否被 taskkill 无关。真正兜底的是进程退出时
+            // Windows 自动放弃未释放的互斥体（下面紧随的 Environment.Exit
+            // 就会触发）。这里保留调用只是"提前交还句柄"的顺手动作，
+            // 失败也无所谓，因此 ReleaseMutex 内部只记日志、不抛。
             ReleaseMutex();
             Thread.Sleep(200);
-
-            ProcessStartInfo updateProcess = CreateUpdateScript(updaterScript, currentExe, downloadedFile, newVersion);
-            Process.Start(updateProcess);
 
             // 退出当前程序，让更新脚本替换文件
             Shutdown(0, $"准备自动更新到 {newVersion}，交由更新脚本替换文件");
@@ -690,9 +718,12 @@ namespace SeewoOpt
         /// <summary>
         /// 创建更新脚本（批处理文件）- 静默更新，不提示不重启
         ///
-        /// 路径传递方式：不用字符串插值把路径写进脚本，而是通过环境变量传递。
-        /// 因为用户可能把程序放在任意目录，路径中若含 & % ! " 等字符，
-        /// 直接插入批处理会造成语法破坏甚至命令注入。
+        /// 路径传递方式：**把路径写进脚本本身**，并把 % 转义成 %%
+        /// （见 UpdateScriptLauncher.EscapeForBatch）。早先用环境变量传，
+        /// 结果连踩两个坑——详见方法尾部那段注释，简言之
+        /// `ProcessStartInfo.EnvironmentVariables` 既要求
+        /// `UseShellExecute = false`，又会被用户机器上"大小写重复的环境变量"
+        /// 直接搞崩，等于把成败押在别人的环境上。
         ///
         /// 失败保护：替换前先备份旧 exe，复制失败时回滚并重试（有次数上限），
         /// 避免"旧文件已删、新文件没拷上"导致程序彻底丢失。
@@ -703,79 +734,35 @@ namespace SeewoOpt
             string backupExe = currentExe + ".bak";
             File.WriteAllText(pendingFile, newExe);
 
-            // 全部走 ASCII：批处理默认编码为 GBK，脚本内出现中文会导致解析错乱
-            string batchContent = @"@echo off
-setlocal enabledelayedexpansion
-title Updating
+            // 生成脚本内容。模板本身住在 UpdateScriptLauncher 里——
+            // 放在那里才能被探针链接到**同一份源码**去真的跑一遍
+            // （把模板留在本类里时，探针只能自己另写一份批处理来测，
+            //   结果我漏掉四个闭合引号它也没发现）。
+            string batchContent = UpdateScriptLauncher.BuildScriptContent(
+                currentExe, newExe, backupExe, pendingFile);
 
-set ""TARGET=%SEEWO_TARGET%""
-set ""SOURCE=%SEEWO_SOURCE%""
-set ""BACKUP=%SEEWO_BACKUP%""
-set ""PENDING=%SEEWO_PENDING%""
-
-:: Give the main process time to fully exit
-ping -n 3 127.0.0.1 > nul
-
-:: Kill any lingering instance
-taskkill /f /im ""%~nx1"" > nul 2>&1
-ping -n 2 127.0.0.1 > nul
-
-:: Back up current executable
-if exist ""%TARGET%"" copy /y ""%TARGET%"" ""%BACKUP%"" > nul
-
-:: Replace with retries (bounded, never loop forever)
-set /a ATTEMPT=0
-:copyloop
-set /a ATTEMPT+=1
-if !ATTEMPT! GTR 5 goto :copyfailed
-
-del /f /q ""%TARGET%"" > nul 2>&1
-copy /y ""%SOURCE%"" ""%TARGET%"" > nul 2>&1
-
-if exist ""%TARGET%"" goto :success
-ping -n 2 127.0.0.1 > nul
-goto :copyloop
-
-:copyfailed
-:: Restore backup so the program is not left missing
-if exist ""%BACKUP%"" (
-    copy /y ""%BACKUP%"" ""%TARGET%"" > nul 2>&1
-    del /f /q ""%BACKUP%"" > nul 2>&1
-)
-echo UPDATE_FAILED > ""%PENDING%""
-del /f /q ""%SOURCE%"" > nul 2>&1
-exit /b 1
-
-:success
-:: Verify the new file is a real PE binary
-set /a SIZE=0
-for %%F in (""%TARGET%"") do set /a SIZE=%%~zF
-if !SIZE! LSS 1024 goto :copyfailed
-
-del /f /q ""%SOURCE%"" > nul 2>&1
-del /f /q ""%SOURCE%.sig"" > nul 2>&1
-del /f /q ""%BACKUP%"" > nul 2>&1
-del /f /q ""%PENDING%"" > nul 2>&1
-del /f /q ""%~f0"" > nul 2>&1
-exit /b 0
-";
+            // 【为什么不再用环境变量传路径——两个独立的坑，都踩过】
+            //   1. `EnvironmentVariables` 只在 `UseShellExecute = false` 时可用，
+            //      设 true 会直接抛异常。2026-10-11 实机的自动更新失败正是
+            //      死在这一条：下载、验签、哈希比对全部通过，卡在启动脚本上。
+            //   2. 更要命的是，`EnvironmentVariables` 的 getter 会把当前进程的
+            //      环境变量整块复制进一个大小写不敏感的字典；只要环境里存在
+            //      "只有大小写不同"的两个键（如 HTTP_PROXY 与 http_proxy，
+            //      MSYS/Git 环境里很常见），它就会抛
+            //      "已添加项。字典中的关键字…" —— 与 UseShellExecute 完全无关。
+            //      也就是说：**只要用了这个机制，就永远受制于用户机器的环境变量**。
+            //
+            // 所以改为把值直接写进脚本本身，一个机制解决两个问题。
+            // 代价是必须自己处理批处理转义（见 UpdateScriptLauncher.EscapeForBatch）。
             File.WriteAllText(scriptPath, batchContent);
             WriteLog($"更新脚本已创建: {scriptPath}");
 
-            // 启动脚本时通过环境变量传递路径，避免路径中的特殊字符破坏批处理语法
-            var psi = new ProcessStartInfo
-            {
-                FileName = scriptPath,
-                UseShellExecute = true,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden
-            };
-            psi.EnvironmentVariables["SEEWO_TARGET"] = currentExe;
-            psi.EnvironmentVariables["SEEWO_SOURCE"] = newExe;
-            psi.EnvironmentVariables["SEEWO_BACKUP"] = backupExe;
-            psi.EnvironmentVariables["SEEWO_PENDING"] = pendingFile;
-
-            return psi;
+            // 构造启动参数。为什么必须是 "UseShellExecute = false + 经 cmd.exe 启动"、
+            // 为什么 cmd.exe 要用绝对路径，全部写在 UpdateScriptLauncher 的注释里。
+            //
+            // 抽成服务类还有个好处：探针（tools/UpdateLaunchProbe）能链接同一份源码
+            // 真的启动一次进程，而不是在测试里复刻一份构造代码。
+            return UpdateScriptLauncher.BuildStartInfo(scriptPath);
         }
 
         private static Assembly CurrentDomain_AssemblyResolve(object sender, ResolveEventArgs args)

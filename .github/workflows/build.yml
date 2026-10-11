@@ -222,3 +222,17 @@ jobs:
             Write-Error "关机链路探针未通过：本程序可能又会阻止 Windows 关机"
             exit 1
           }
+
+      # 【为什么这个探针必须进 CI】
+      # 它是唯一能验证"自动更新最后一步"的东西：用产品真实模板在临时目录里
+      # 跑一次完整替换演练（真文件、真脚本），并核对替换结果。
+      # 2026-10-11 的更新失败正是死在这一步，而它不在任何函数返回值里——
+      # 纯逻辑测试测不到，只能真的 CreateProcess 一次。
+      - name: 运行更新脚本探针（下载→验签→替换链路）
+        shell: pwsh
+        run: |
+          dotnet run --project tools\UpdateLaunchProbe.csproj -c Release
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "更新脚本探针未通过：自动更新可能在最后一步失败"
+            exit 1
+          }

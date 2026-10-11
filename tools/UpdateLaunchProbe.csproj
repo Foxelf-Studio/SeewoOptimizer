@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AssemblyName>UpdateLaunchProbe</AssemblyName>
+    <RootNamespace>SeewoOpt.Tools</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <LangVersion>7.3</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      更新脚本启动探针。
+
+      【为什么必须有它】
+      2026-10-11 实机：自动更新在**最后一步**崩了——
+      下载、验签、哈希比对全部通过，却卡在"启动替换脚本"上，抛
+      "The Process object must have the UseShellExecute property set to false
+       in order to use environment variables."
+
+      这类缺陷在纯逻辑测试里永远测不到：它不在任何函数返回值里，
+      只在**真的 CreateProcess** 那一刻暴露。所以探针要真的启动一次进程，
+      读回脚本写出的文件来确认环境变量确实传到了。
+
+      【为什么必须 net48】
+      `EnvironmentVariables` 与 `UseShellExecute = true` 的冲突是
+      .NET Framework 抛的异常；.NET Core 的实现不同，测不出同一个问题。
+      产品是 net48，探针就必须是 net48。
+
+      【为什么链接真实源码】
+      探针断言的是产品**同一份**构造代码（Services/UpdateScriptLauncher.cs）。
+      若在这里复刻一份"看起来一样"的构造，产品改了副本没改，
+      探针照样全绿——那就是假测试（本项目已多次确认）。
+    -->
+    <Compile Include="UpdateLaunchProbe.cs" />
+    <Compile Include="..\WindowsFormsApp1\Services\UpdateScriptLauncher.cs" />
+  </ItemGroup>
+</Project>

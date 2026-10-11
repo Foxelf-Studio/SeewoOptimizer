@@ -1,4 +1,4 @@
-﻿using System;
+﻿﻿using System;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
@@ -26,7 +26,7 @@ namespace SeewoOpt.Services
         /// 构建号。每次交付新 exe 手动递增，绝不与上一个交付物重复。
         /// 格式：yyyy.MM.dd-r序号
         /// </summary>
-        public const string BuildId = "2026.10.11-r20";
+        public const string BuildId = "2026.10.11-r21";
 
         private static string _cached;
 
