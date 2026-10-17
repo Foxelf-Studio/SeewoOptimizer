@@ -8,7 +8,7 @@
 
 陈叔叔希沃优化助手是一款面向**老希沃 / 多媒体教室**、主要针对 **Windows 7** 的轻量级桌面工具。它最早是为了解决几件在教室里反复发生的事：
 
-- 主板电池失效或 Windows Time 服务异常，**系统时间停在 2000 年**；
+- 主板电池失效或 Windows Time 服务异常，**系统时间停在 “清朝”**；
 - **音量太小、老师又不会调**，同学们没法愉快地看课件里的视频（而且没人知道要先退出 PPT 才能调系统音量）；
 - **WPS 2019 打不开课件**，得先结束 `wps.exe` 再重新打开；
 - 放学后老是忘记关机，长时间通电和突然断电都伤机器——所以加了**自动关机时间点**（如果你心疼班里那台电脑的话）。
@@ -336,4 +336,4 @@ Copyright (C) 2025-2026 **Foxelf Studio**
 - 提交 Issue：[GitHub Issues](https://github.com/Foxelf-Studio/SeewoOptimizer/issues)
 - 发邮件给我：thetimeflies@vip.qq.com
 
-提 Issue 时顺手贴上 `startup.log` 和界面上的「已守护 x 天」，比只写一句“用不了”有用得多——隔着屏幕我猜不出来。
+提 Issue 时尽量贴上 `startup.log` ，有助于更好地解决问题
