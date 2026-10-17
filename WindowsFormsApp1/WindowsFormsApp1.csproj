@@ -88,6 +88,7 @@
     <Compile Include="Services\ShutdownSchedule.cs" />
     <Compile Include="Services\ShutdownService.cs" />
     <Compile Include="Services\SignatureVerifier.cs" />
+    <Compile Include="Services\UpdateSourcePolicy.cs" />
     <Compile Include="Services\UpdateScriptLauncher.cs" />
     <Compile Include="Services\VolumeController.cs" />
     <Compile Include="ShutdownWarningDialog.cs">

@@ -57,5 +57,12 @@
       完全不需要出现在测试里。
     -->
     <Compile Include="..\WindowsFormsApp1\Services\SignatureVerifier.cs" />
+    <Compile Include="..\WindowsFormsApp1\Services\UpdateSourcePolicy.cs" />
+    <!--
+      Release JSON 解析由 GitHub 与 Gitee 共用，是两条更新链路里唯一
+      完全可离线验证的部分。Gitee 的资产对象没有 size 字段、
+      资产列表里还混着源码包——这两点必须由测试钉住。
+    -->
+    <Compile Include="..\WindowsFormsApp1\Services\ReleaseInfoParser.cs" />
   </ItemGroup>
 </Project>

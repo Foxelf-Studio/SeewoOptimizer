@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
@@ -17,9 +18,27 @@ namespace SeewoOpt
         // 日志路径统一定义在 LogService，此处仅做转发以兼容既有调用点
         public static readonly string LogFilePath = LogService.LogFilePath;
 
-        // GitHub 配置
+        // ---- 更新源 ----
+        //
+        // 【为什么有两个】教室网络里 GitHub 经常整段不可达：
+        //   · api.github.com —— DNS 被污染，或返回一个连不上的地址；
+        //   · objects.githubusercontent.com —— Release 资产实际存放的地方，
+        //     常在 IP 层被拦。
+        // 用户看到的"无法连接到远程服务器"就是这两处，换个域名修不了，
+        // 只能换一个国内可达的托管。
+        //
+        // Gitee 的发行版附件实测可匿名直链下载（302 到 foruda CDN 后返回 200，
+        // 不需要 Cookie、不需要验证码、不需要代理），所以作为并列源：
+        // 两边都查，取版本更高的；版本相同时优先用 Gitee 下载。
+        // 任一源查询失败不影响另一个，也不会让程序其它功能受影响。
         private const string GITHUB_API = "https://api.github.com/repos/Foxelf-Studio/SeewoOptimizer/releases/latest";
+        private const string GITEE_API = "https://gitee.com/api/v5/repos/Foxelf-Studio/SeewoOptimizer/releases/latest";
         private const string GITHUB_USER_AGENT = "SeewoOptimizer-Updater";
+
+        // 查版本这一步的预算（秒）。
+        // WebClient 没有 Timeout 属性，底层默认约 100 秒；原来这里没包超时，
+        // 网络不通时表现为"检查更新像卡死"，而不是快速失败并换源。
+        private const int VERSION_QUERY_TIMEOUT_SECONDS = 15;
 
         /// <summary>
         /// 更新缓存目录。
@@ -396,76 +415,56 @@ namespace SeewoOpt
                 if (!Directory.Exists(UPDATE_DIR))
                     Directory.CreateDirectory(UPDATE_DIR);
 
-                using (WebClient client = new WebClient())
+                // 两个源并行查：任何一边通了都能出结果，互不阻塞。
+                // 各自 15 秒超时，所以最坏 15 秒就有结论——原来这里没有超时，
+                // 网络不通时会白等 WebClient 默认的约 100 秒，
+                // 表现成"检查更新卡死"，用户以为程序坏了。
+                UpdateCandidate[] found = await Task.WhenAll(
+                    FetchLatestReleaseAsync(GITEE_API, "Gitee", true),
+                    FetchLatestReleaseAsync(GITHUB_API, "GitHub", false));
+
+                UpdateCandidate best = UpdateSourcePolicy.PickNewer(found[0], found[1]);
+
+                if (best == null)
                 {
-                    client.Headers.Add("User-Agent", GITHUB_USER_AGENT);
-                    client.Headers.Add("Accept", "application/vnd.github.v3+json");
-                    client.Encoding = Encoding.UTF8;
+                    // 两个源都不可用：这是网络环境问题，不是程序故障。
+                    // 仍然置位失败标记——时间同步成功后会再试一次，
+                    // 而"时钟错误导致所有 HTTPS 失败"正是要靠那次重试救回来的场景。
+                    _updateCheckFailed = true;
+                    WriteLog("两个更新源都不可用，本次跳过更新检查（不影响关机、同步等其它功能）");
+                    return;
+                }
 
-                    string jsonResponse = await client.DownloadStringTaskAsync(GITHUB_API);
-                    WriteLog("GitHub API 响应成功");
-                    WriteLog($"响应内容长度: {jsonResponse.Length}");
+                WriteLog($"选定更新源: {best.SourceName}，最新版本 {best.Version}");
+                WriteLog($"选定资产: {best.AssetName}");
+                WriteLog($"下载地址: {best.DownloadUrl}");
 
-                    // 用框架自带的 JSON 序列化器解析，正确处理转义与多资产场景
-                    if (!ReleaseInfoParser.TryParse(jsonResponse, out ReleaseInfo release, out string parseError))
-                    {
-                        WriteLog($"解析 Release 信息失败: {parseError}");
-                        return;
-                    }
+                _expectedUpdateHash = best.ExpectedSha256;
+                if (_expectedUpdateHash != null)
+                    WriteLog($"从发布说明中提取到 SHA256: {_expectedUpdateHash}");
+                else
+                    WriteLog("发布说明中未找到 SHA256 哈希，将仅依赖签名校验");
 
-                    WriteLog($"提取到 tag_name: {release.TagName}");
+                if (best.Version.CompareTo(currentVersion) > 0)
+                {
+                    WriteLog("发现新版本，准备自动更新");
 
-                    // 从资产列表中挑选可执行文件——不再简单取第一个
-                    ReleaseAsset asset = ReleaseInfoParser.SelectExecutableAsset(release.Assets);
-                    if (asset == null)
-                    {
-                        WriteLog("未在 Release 资产中找到可执行文件（.exe/.msi）");
-                        return;
-                    }
+                    // 缓存更新信息
+                    PendingUpdateInfo = Tuple.Create(best.Version.ToString(), "正在自动更新...");
+                    UpdateDetected?.Invoke(best.Version.ToString(), "正在自动更新...");
 
-                    string downloadUrl = asset.BrowserDownloadUrl;
-                    WriteLog($"选定资产: {asset.Name}（{asset.Size} 字节）");
-                    WriteLog($"下载地址: {downloadUrl}");
+                    // 备用下载地址：另一个源如果报的是同一个版本，
+                    // 它就是这个版本的天然备份（Gitee 不通换 GitHub，反之亦然）。
+                    // 版本不同就不加——那说明另一个源还没同步，拿它的地址只会下到旧版。
+                    List<string> downloadUrls = UpdateSourcePolicy.BuildDownloadUrls(best, found);
 
-                    // 从发布说明（body）中提取预期的 SHA256 哈希
-                    _expectedUpdateHash = ReleaseInfoParser.TryExtractExpectedSha256(release.Body);
-                    if (_expectedUpdateHash != null)
-                    {
-                        WriteLog($"从发布说明中提取到 SHA256: {_expectedUpdateHash}");
-                    }
-                    else
-                    {
-                        WriteLog("发布说明中未找到 SHA256 哈希，将仅依赖签名校验");
-                    }
-
-                    // 从资产名提取文件名（比从 URL 解析更可靠）
-                    string fileName = asset.Name;
-                    WriteLog($"提取到文件名: {fileName}");
-
-                    Version latestVersion = ReleaseInfoParser.ParseVersion(release.TagName);
-                    if (latestVersion == null)
-                    {
-                        WriteLog($"无法解析版本号: {release.TagName}，跳过本次更新检查");
-                        return;
-                    }
-
-                    WriteLog($"GitHub 最新版本: {latestVersion}");
-
-                    if (latestVersion.CompareTo(currentVersion) > 0)
-                    {
-                        WriteLog("发现新版本，准备自动更新");
-
-                        // 缓存更新信息
-                        PendingUpdateInfo = Tuple.Create(latestVersion.ToString(), "正在自动更新...");
-                        UpdateDetected?.Invoke(latestVersion.ToString(), "正在自动更新...");
-
-                        // 带重试的下载
-                        await DownloadUpdateWithRetryAsync(downloadUrl, fileName, latestVersion, _expectedUpdateHash);
-                    }
-                    else
-                    {
-                        WriteLog("已是最新版本");
-                    }
+                    // 带重试的下载
+                    await DownloadUpdateWithRetryAsync(
+                        downloadUrls, best.AssetName, best.Version, best.ExpectedSha256);
+                }
+                else
+                {
+                    WriteLog("已是最新版本");
                 }
             }
             catch (Exception ex)
@@ -499,6 +498,78 @@ namespace SeewoOpt
         }
 
         /// <summary>
+        /// 查询一个更新源的"最新发行版"。失败返回 null，不抛异常。
+        ///
+        /// 两个源（GitHub / Gitee）的 JSON 结构足够接近
+        /// （tag_name / body / assets[].name / assets[].browser_download_url），
+        /// 所以复用同一个解析器。
+        ///
+        /// 已实测的差异：Gitee 的资产对象**没有 size 字段**，
+        /// 反序列化出来是 0，所以日志里不能用它判断文件大小。
+        /// </summary>
+        private static async Task<UpdateCandidate> FetchLatestReleaseAsync(
+            string apiUrl, string sourceName, bool isDomestic)
+        {
+            try
+            {
+                string json;
+                using (WebClient client = new WebClient())
+                {
+                    client.Headers.Add("User-Agent", GITHUB_USER_AGENT);
+                    // Accept 是 GitHub 的约定；Gitee 不认这个头。
+                    // 只给 GitHub 加，避免以后看代码时误以为 Gitee 也需要。
+                    if (!isDomestic)
+                        client.Headers.Add("Accept", "application/vnd.github.v3+json");
+                    client.Encoding = Encoding.UTF8;
+
+                    json = await DownloadStringWithTimeoutAsync(
+                        client, apiUrl, VERSION_QUERY_TIMEOUT_SECONDS, sourceName + " 版本查询");
+                }
+
+                // 用框架自带的 JSON 序列化器解析，正确处理转义与多资产场景
+                if (!ReleaseInfoParser.TryParse(json, out ReleaseInfo release, out string parseError))
+                {
+                    WriteLog($"{sourceName}: 解析发行版信息失败（{parseError}）");
+                    return null;
+                }
+
+                // 从资产列表中挑选可执行文件——不再简单取第一个
+                ReleaseAsset asset = ReleaseInfoParser.SelectExecutableAsset(release.Assets);
+                if (asset == null)
+                {
+                    WriteLog($"{sourceName}: 发行版 {release.TagName} 中没有 .exe 资产");
+                    return null;
+                }
+
+                Version version = ReleaseInfoParser.ParseVersion(release.TagName);
+                if (version == null)
+                {
+                    WriteLog($"{sourceName}: 无法解析版本号 {release.TagName}");
+                    return null;
+                }
+
+                // 从发布说明（body）中提取预期的 SHA256 哈希
+                return new UpdateCandidate
+                {
+                    SourceName = sourceName,
+                    IsDomestic = isDomestic,
+                    Version = version,
+                    AssetName = asset.Name,
+                    DownloadUrl = asset.BrowserDownloadUrl,
+                    ExpectedSha256 = ReleaseInfoParser.TryExtractExpectedSha256(release.Body)
+                };
+            }
+            catch (Exception ex)
+            {
+                // 单源失败只记一行：常见原因是 DNS 污染、IP 被拦、
+                // 或者 Gitee 仓库还没创建（404）。这些都属于"这个源用不了"，
+                // 不是"程序坏了"，不该让整次检查以异常收场。
+                WriteLog($"{sourceName} 版本查询失败：{ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
         /// 判断异常是否源于"本机时钟错误导致证书不在有效期内"。
         ///
         /// 这类失败的特征是异常链里同时出现 TLS 握手失败与证书校验失败，
@@ -519,41 +590,60 @@ namespace SeewoOpt
         }
 
         /// <summary>
-        /// 带重试机制的下载更新文件
+        /// 带重试机制的下载更新文件。
+        ///
+        /// 【为什么参数是一串地址】有了两个源之后，同一个版本通常有两个
+        /// 可下载地址（Gitee 与 GitHub）。原来一次只试一个 URL，
+        /// 主源不通就整轮失败，白白浪费另一个本来可用的地址。
+        ///
+        /// 【为什么要有总预算】每个地址单次预算 60 + 30 秒，若不封顶，
+        /// 两轮 × 两个地址就是 6 分钟——网络不通时用户只会以为程序卡死。
+        /// 这里整体 180 秒封顶，到点就如实失败，保持旧版本继续运行。
         /// </summary>
-        private static async Task<bool> DownloadUpdateWithRetryAsync(string downloadUrl, string fileName, Version newVersion, string expectedHash = null)
+        private static async Task<bool> DownloadUpdateWithRetryAsync(
+            IList<string> downloadUrls, string fileName, Version newVersion, string expectedHash = null)
         {
-            const int maxRetries = 3;
+            const int totalBudgetMs = 180000;
             const int retryDelayMs = 2000;
 
-            for (int retry = 0; retry < maxRetries; retry++)
+            Stopwatch budget = Stopwatch.StartNew();
+
+            for (int round = 1; round <= 2; round++)
             {
-                try
+                for (int i = 0; i < downloadUrls.Count; i++)
                 {
-                    await DownloadUpdateAsync(downloadUrl, fileName, newVersion, expectedHash);
-                    return true; // 成功
-                }
-                catch (Exception ex)
-                {
-                    // 【措辞修正，来自实机日志】
-                    // 这个方法包住的是"下载 → 验签 → 校验哈希 → 生成并启动更新脚本"
-                    // 整条链路，任何一步失败都会走到这里。原来一律写"下载失败"，
-                    // 而实机日志里明明已经出现"下载进度 100% / 签名校验有效 /
-                    // 哈希与发布说明一致"，紧接着却是一行"下载失败"——
-                    // 排查方向被完全带偏（那次真正失败的是启动脚本）。
-                    WriteLog($"更新失败（第 {retry + 1}/{maxRetries} 次尝试）: {ex.Message}");
-                    if (retry == maxRetries - 1)
+                    if (totalBudgetMs - budget.ElapsedMilliseconds < 15000)
                     {
+                        WriteLog($"更新下载已用尽 {totalBudgetMs / 1000} 秒总预算，停止尝试");
                         WriteLog("更新最终失败，程序保持原版本继续运行（未做任何改动）");
                         return false;
                     }
-                    else
+
+                    try
                     {
-                        WriteLog($"等待 {retryDelayMs}ms 后重试...");
-                        await Task.Delay(retryDelayMs);
+                        await DownloadUpdateAsync(downloadUrls[i], fileName, newVersion, expectedHash);
+                        return true; // 成功
+                    }
+                    catch (Exception ex)
+                    {
+                        // 【措辞修正，来自实机日志】
+                        // 这个方法包住的是"下载 → 验签 → 校验版本 → 生成并启动更新脚本"
+                        // 整条链路，任何一步失败都会走到这里。原来一律写"下载失败"，
+                        // 而实机日志里明明已经出现"下载进度 100% / 签名校验有效 /
+                        // 哈希与发布说明一致"，紧接着却是一行"下载失败"——
+                        // 排查方向被完全带偏（那次真正失败的是启动脚本）。
+                        WriteLog($"更新失败（第 {round} 轮，源 {i + 1}/{downloadUrls.Count}）: {ex.Message}");
                     }
                 }
+
+                if (round == 1)
+                {
+                    WriteLog($"等待 {retryDelayMs}ms 后换源重试...");
+                    await Task.Delay(retryDelayMs);
+                }
             }
+
+            WriteLog("更新最终失败，程序保持原版本继续运行（未做任何改动）");
             return false;
         }
 
@@ -591,6 +681,37 @@ namespace SeewoOpt
                 }
 
                 await downloadTask;
+            }
+        }
+
+        /// <summary>
+        /// 带显式超时的字符串下载（用于查询版本 JSON）。
+        ///
+        /// 与 DownloadFileWithTimeoutAsync 同一套办法，只是返回文本：
+        /// WebClient 没有 Timeout 属性，裸调 DownloadStringTaskAsync 会等约 100 秒。
+        /// 两个源并行查询时若不设上限，一个被墙的源就能把整次检查拖住。
+        /// </summary>
+        private static async Task<string> DownloadStringWithTimeoutAsync(
+            WebClient client, string url, int timeoutSeconds, string what)
+        {
+            using (var cts = new CancellationTokenSource())
+            {
+                cts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+
+                Task<string> queryTask = client.DownloadStringTaskAsync(new Uri(url));
+                Task completed = await Task.WhenAny(queryTask, Task.Delay(-1, cts.Token));
+
+                if (completed != queryTask)
+                {
+                    client.CancelAsync();
+                    // 观察被取消的任务，别让它的异常留到终结器线程。
+                    _ = queryTask.ContinueWith(t => t.Exception,
+                        TaskContinuationOptions.OnlyOnFaulted);
+
+                    throw new TimeoutException(what + "超时（" + timeoutSeconds + " 秒）");
+                }
+
+                return await queryTask;
             }
         }
 
@@ -653,6 +774,18 @@ namespace SeewoOpt
             {
                 TryDelete(downloadedFile);
                 throw new Exception("下载的文件不是有效的 Windows 可执行文件（PE 头验证失败），更新已取消");
+            }
+
+            // 【版本校验：引入第二个源之后，这一条从"锦上添花"变成"必须"】
+            // 签名只能证明"这个文件确实是作者发的"，不能证明"是我要的那一版"。
+            // 任何处在中间的源（镜像、被劫持的域名、配置错的 CDN）都可以
+            // 返回一个真实、签名有效的**旧版** exe，再配一个写着高版本号的 JSON。
+            // 不校验版本，就等于把"降级到有已知缺陷的旧版"做成了一条正常路径。
+            if (!MatchesTargetVersion(downloadedFile, newVersion, out string versionError))
+            {
+                TryDelete(downloadedFile);
+                TryDelete(signatureFile);
+                throw new Exception(versionError);
             }
 
             // 第一道也是唯一能抵御"仓库被入侵"的关卡：RSA 发布签名。
@@ -894,6 +1027,54 @@ namespace SeewoOpt
                 {
                     WriteLog($"× 提取DLL {dllName} 时出错：{ex.Message}");
                 }
+            }
+        }
+
+        /// <summary>
+        /// 校验下载到的 exe 的版本号是否等于目标版本。
+        ///
+        /// 用 FileVersion 而不是 AssemblyVersion：前者是 FileVersionInfo 能直接读到的，
+        /// 也是发布流程里和 tag 对齐的那个（CI 校验的就是它）。
+        ///
+        /// 比较前统一成 Major.Minor.Build 三段：AssemblyVersion 可能是
+        /// "26.10.17"，而某些构建会写成 "26.10.17.0"。Version 的 CompareTo
+        /// 会认为缺省段是 -1，两者不相等——直接比会误判成"版本不符"，
+        /// 把一次正常的更新拦下来。
+        /// </summary>
+        private static bool MatchesTargetVersion(string exePath, Version target, out string error)
+        {
+            error = null;
+
+            try
+            {
+                string fileVersion = FileVersionInfo.GetVersionInfo(exePath).FileVersion;
+
+                if (string.IsNullOrWhiteSpace(fileVersion))
+                {
+                    error = "下载的文件没有版本信息，更新已取消（可能是被替换过的文件）";
+                    return false;
+                }
+
+                if (!Version.TryParse(fileVersion.Trim(), out Version parsed))
+                {
+                    error = $"无法解析下载文件的版本号“{fileVersion}”，更新已取消";
+                    return false;
+                }
+
+                if (!UpdateSourcePolicy.VersionMatches(parsed, target))
+                {
+                    error = $"下载的文件版本为 {fileVersion}，与目标版本 {target} 不一致，"
+                          + "更新已取消（可能是更新源返回了旧版本）";
+                    return false;
+                }
+
+                WriteLog($"版本校验通过：{fileVersion}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = "读取下载文件版本失败：" + ex.Message;
+                return false;
             }
         }
 

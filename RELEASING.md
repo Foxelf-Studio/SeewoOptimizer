@@ -57,6 +57,45 @@ CI 在推送 `v*` 标签时会：
 
 因此“标签写 26.10.17、程序集还是 26.10.11”这种错误会在 CI 就暴露，不会等到用户更新时才发现。
 
+## 同步发布到 Gitee（国内更新源）
+
+教室网络里 GitHub 经常整段不可达：`api.github.com` 被 DNS 污染、
+`objects.githubusercontent.com` 在 IP 层被拦。客户端因此同时查询两个源，
+**版本高的优先，版本相同时优先用 Gitee 下载**。
+
+Gitee 那一路要能生效，每次发版都必须同步一次：
+
+1. 在 Gitee 建一个**公开**仓库，路径与 `Program.cs` 里的 `GITEE_API` 常量一致
+   （当前是 `Foxelf-Studio/SeewoOptimizer`）。路径不同就改常量，两边必须对上。
+   Gitee 发布发行版要求账号已实名认证。
+2. 把同一个标签推上去（只推标签也够，客户端只读发行版）：
+   ```bash
+   git push gitee v26.10.17
+   ```
+3. 在 Gitee 创建发行版。**版本号必须与 GitHub 的标签完全一致**（`v26.10.17`）：
+   - 客户端用 tag 解析版本号；
+   - 同版本才会把 Gitee 的地址当作首选下载地址；
+   - 版本号写错（比如多写个 `.1`）会让客户端认为有更新，然后被版本校验拦下。
+4. 上传附件，**文件名必须与 GitHub 上完全一致**：
+   - 先 `SeewoOpt.exe`，再 `SeewoOpt.exe.sig`；
+   - `.sig` 的地址是 exe 地址后面直接拼 `.sig` 得来的，改名就对不上；
+   - 只传 exe 不传 sig，更新会在验签阶段失败，日志写“未找到更新文件的签名”。
+5. 发行说明里同样写一行 `SHA256: <64 位十六进制>`（客户端会记录，签名仍是硬门槛）。
+
+验证附件可用（应当 `302 → 302 → 200`，不需要 Cookie、不需要登录）：
+
+```bash
+curl -sIL "https://gitee.com/Foxelf-Studio/SeewoOptimizer/releases/download/v26.10.17/SeewoOpt.exe" ^
+  | findstr /I "HTTP/ location content-length"
+```
+
+已知限制：
+
+- 单附件上限 100 MB，仓库附件总量 1 GB——650 KB 的 exe 够发上千次。
+- Gitee 的发行版 API **不返回 `size` 字段**，客户端不依赖它。
+- Gitee 落后于 GitHub 时不会让用户卡住：两边都查，取版本高的那个；
+  但如果 GitHub 同时不可达，用户就停在旧版，所以**发版时两边都要传**。
+
 ## 轮换签名密钥
 
 客户端只信任编译进 exe 的公钥（`Services/SignatureVerifier.cs` 的

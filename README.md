@@ -167,27 +167,37 @@
 ```mermaid
 sequenceDiagram
     participant P as 程序
-    participant G as GitHub API
+    participant G as Gitee API
+    participant H as GitHub API
     participant D as 下载服务器
     participant B as 更新脚本
 
-    P->>G: GET /releases/latest
-    G-->>P: JSON
-    P->>P: DataContractJsonSerializer 解析，按扩展名选 exe
+    par 两个源并行查，各自 15 秒超时
+        P->>G: GET /releases/latest
+    and
+        P->>H: GET /releases/latest
+    end
+    G-->>P: JSON（可能失败）
+    H-->>P: JSON（可能失败）
+    P->>P: 取版本更高的源；同版本优先 Gitee
     alt 版本更高
-        P->>D: 下载 exe（60 秒预算）
+        P->>D: 下载 exe（60 秒预算，主源失败自动换另一个源）
         P->>D: 下载 .sig（30 秒预算）
-        P->>P: PE 头 + RSA 发布签名校验
+        P->>P: PE 头 → 版本号 → RSA 发布签名
         P->>B: 启动 UpdateScriptLauncher
         P->>P: 释放互斥体并退出
         B->>B: 备份 → 替换（失败回滚，最多 5 次）
     end
 ```
 
-- Release 用 `DataContractJsonSerializer` 解析，不再用正则；资产按 `.exe` / `.msi` 筛选，排除 `.sig` 等附属文件。
+- **两个源**：Gitee 与 GitHub 并行查询，各自 15 秒超时。任一源通就能出结果，取版本更高的那个；版本相同时优先用 Gitee 下载（国内可达）。这次改动的直接原因就是教室网络里 `api.github.com` 与 `objects.githubusercontent.com` 经常整段不可达。
+- **三个校验，顺序不能换**：PE 头 → **版本号 == 目标版本** → RSA 签名。签名只证明“这是作者发的”，版本校验才证明“是我要的那一版”——否则任何中间源都能拿一个真签名的旧版 exe 配上高版本号，把你降级到有已知缺陷的旧版本。
+- Release 用 `DataContractJsonSerializer` 解析，不再用正则；资产按 `.exe` / `.msi` 筛选，排除 `.sig` 等附属文件。Gitee 的资产没有 `size` 字段，程序不依赖它。
 - **签名是唯一的信任锚**：RSA / PKCS#1 v1.5 / SHA-256；SHA256 只记录，不阻止更新（它和文件来自同一个响应，挡不住仓库被入侵）。
+- 下载总预算 180 秒封顶：两轮 × 两个源，任何一种网络状况都不会让“检查更新”变成无限等待。
 - 更新脚本把路径转义后写进批处理，不再通过环境变量传递；替换前备份旧 exe，失败自动回滚并写 `UPDATE_FAILED`，下次启动会记一条明确的失败日志并清理标记。
 - 时钟错误会让 HTTPS 证书校验失败；启动时那次更新检查失败后，会在时间同步成功后自动重试，等待上限 60 秒。
+- 两个源都不可用时不报错、不影响关机与同步，只在日志里记一行——教室机器经常整月连不上外网，这属于正常状态。
 
 ### 6. 单实例与退出
 

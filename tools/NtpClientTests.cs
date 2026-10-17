@@ -112,6 +112,15 @@ internal static class NtpClientTests
         // --- 签名信任链（换钥过渡）---
         TestSignatureVerifierAcceptsSecondKey();
 
+        // --- 多更新源选源（Gitee / GitHub）---
+        TestPickNewerPrefersHigherVersion();
+        TestPickNewerPrefersDomesticOnTie();
+        TestPickNewerToleratesMissingSource();
+        TestBuildDownloadUrlsOnlySameVersion();
+        TestVersionMatchesIgnoresMissingRevision();
+        TestVersionMatchesRejectsOlderBuild();
+        TestGiteeReleaseJsonParsesWithoutSize();
+
         // --- 畸形输入 ---
         TestRejectsShortPacket();
         TestRejectsNullPacket();
@@ -2360,6 +2369,146 @@ internal static class NtpClientTests
     // ---------------------------------------------------------------
 
     /// <summary>便捷重载：不需要附加说明时省略 detail</summary>
+    // ---------------------------------------------------------------
+    // 多更新源选源（Gitee / GitHub）
+    // ---------------------------------------------------------------
+
+    /// <summary>
+    /// 版本高的优先，与来源无关——Gitee 落后时不能让用户卡在旧版。
+    /// </summary>
+    private static void TestPickNewerPrefersHigherVersion()
+    {
+        UpdateCandidate gitee = MakeCandidate("Gitee", true, "26.10.16", "https://gitee.com/a.exe");
+        UpdateCandidate github = MakeCandidate("GitHub", false, "26.10.17", "https://github.com/a.exe");
+
+        UpdateCandidate best = UpdateSourcePolicy.PickNewer(gitee, github);
+
+        Check("选源：GitHub 版本更高时选 GitHub", best == github, best == null ? "null" : best.SourceName);
+    }
+
+    /// <summary>版本相同时优先国内源——教室里下载更快。</summary>
+    private static void TestPickNewerPrefersDomesticOnTie()
+    {
+        UpdateCandidate gitee = MakeCandidate("Gitee", true, "26.10.17", "https://gitee.com/a.exe");
+        UpdateCandidate github = MakeCandidate("GitHub", false, "26.10.17", "https://github.com/a.exe");
+
+        Check("选源：同版本时选 Gitee", UpdateSourcePolicy.PickNewer(gitee, github) == gitee);
+        Check("选源：参数顺序不影响结论", UpdateSourcePolicy.PickNewer(github, gitee) == gitee);
+    }
+
+    /// <summary>任一端不可用（null）时用另一端；两端都不可用返回 null。</summary>
+    private static void TestPickNewerToleratesMissingSource()
+    {
+        UpdateCandidate gitee = MakeCandidate("Gitee", true, "26.10.17", "https://gitee.com/a.exe");
+
+        Check("选源：GitHub 不可用时用 Gitee", UpdateSourcePolicy.PickNewer(gitee, null) == gitee);
+        Check("选源：Gitee 不可用时用 GitHub", UpdateSourcePolicy.PickNewer(null, gitee) == gitee);
+        Check("选源：两个都不可用返回 null", UpdateSourcePolicy.PickNewer(null, null) == null);
+    }
+
+    /// <summary>
+    /// 备用地址只收同版本的源：另一个源还没同步时，
+    /// 拿它的地址只会下到旧版——而签名对旧版同样有效，只能靠版本校验兜住。
+    /// </summary>
+    private static void TestBuildDownloadUrlsOnlySameVersion()
+    {
+        UpdateCandidate gitee = MakeCandidate("Gitee", true, "26.10.17", "https://gitee.com/a.exe");
+        UpdateCandidate githubSame = MakeCandidate("GitHub", false, "26.10.17", "https://github.com/a.exe");
+        UpdateCandidate githubOlder = MakeCandidate("GitHub", false, "26.10.16", "https://github.com/old.exe");
+
+        var same = UpdateSourcePolicy.BuildDownloadUrls(gitee, new[] { gitee, githubSame });
+        Check("地址：同版本收两个地址", same.Count == 2, string.Join(", ", same));
+        Check("地址：主地址排在最前", same[0] == "https://gitee.com/a.exe");
+        Check("地址：重复地址去重",
+            UpdateSourcePolicy.BuildDownloadUrls(gitee, new[] { gitee, gitee }).Count == 1);
+
+        var older = UpdateSourcePolicy.BuildDownloadUrls(gitee, new[] { gitee, githubOlder });
+        Check("地址：另一个源版本更旧时不收", older.Count == 1, string.Join(", ", older));
+
+        Check("地址：没有主源时返回空列表",
+            UpdateSourcePolicy.BuildDownloadUrls(null, new[] { gitee }).Count == 0);
+    }
+
+    /// <summary>
+    /// 三段与四段版本号必须视为相等：
+    /// AssemblyVersion 常是 26.10.17，FileVersion 可能被写成 26.10.17.0，
+    /// 直接 CompareTo 会把一次正常更新误判成"版本不符"。
+    /// </summary>
+    private static void TestVersionMatchesIgnoresMissingRevision()
+    {
+        Check("版本：26.10.17 与 26.10.17.0 视为相同",
+            UpdateSourcePolicy.VersionMatches(new Version("26.10.17.0"), new Version("26.10.17")));
+
+        Check("版本：修订号不同不影响判定",
+            UpdateSourcePolicy.VersionMatches(new Version("26.10.17.7"), new Version("26.10.17")));
+    }
+
+    /// <summary>低版本必须被拒绝——这是镜像返回旧版 exe 时唯一的拦截条件。</summary>
+    private static void TestVersionMatchesRejectsOlderBuild()
+    {
+        Check("版本：26.10.16 不能冒充 26.10.17",
+            !UpdateSourcePolicy.VersionMatches(new Version("26.10.16"), new Version("26.10.17")));
+
+        Check("版本：空版本号一律拒绝",
+            !UpdateSourcePolicy.VersionMatches(null, new Version("26.10.17")));
+    }
+
+    /// <summary>
+    /// Gitee 的发行版 JSON 与 GitHub 有两处实际差异，都要能吃下：
+    ///   1. assets 里**没有 size 字段**（反序列化后是 0，日志里不能当真）；
+    ///   2. assets 里混着自动生成的源码包（/archive/refs/tags/...），
+    ///      它不是可执行文件，必须被跳过。
+    /// 样本取自真实响应的裁剪版，而不是照着 GitHub 的字段手写。
+    /// </summary>
+    private static void TestGiteeReleaseJsonParsesWithoutSize()
+    {
+        const string json =
+            "{\"id\":784180,\"tag_name\":\"v26.10.17\",\"prerelease\":false," +
+            "\"body\":\"修复关机补执行。\\n\\nSHA256: " +
+            "F8CF4CB4CC73FB171731F7161437A79BDADB571FFBD4FC681D97B055C0CF288B\"," +
+            "\"assets\":[" +
+            "{\"browser_download_url\":\"https://gitee.com/x/y/archive/refs/tags/v26.10.17.zip\"," +
+            "\"name\":\"v26.10.17.zip\"}," +
+            "{\"browser_download_url\":\"https://gitee.com/x/y/releases/download/v26.10.17/SeewoOpt.exe\"," +
+            "\"name\":\"SeewoOpt.exe\"}," +
+            "{\"browser_download_url\":\"https://gitee.com/x/y/releases/download/v26.10.17/SeewoOpt.exe.sig\"," +
+            "\"name\":\"SeewoOpt.exe.sig\"}" +
+            "]}";
+
+        bool parsed = ReleaseInfoParser.TryParse(json, out ReleaseInfo release, out string error);
+        Check("Gitee：缺少 size 字段也能解析", parsed, error);
+        if (!parsed) return;
+
+        Version tagVersion = ReleaseInfoParser.ParseVersion(release.TagName);
+        Check("Gitee：tag 解析为 26.10.17",
+            tagVersion != null && tagVersion.ToString() == "26.10.17",
+            release.TagName);
+
+        ReleaseAsset asset = ReleaseInfoParser.SelectExecutableAsset(release.Assets);
+        Check("Gitee：跳过源码包，选中 .exe",
+            asset != null && asset.Name == "SeewoOpt.exe",
+            asset == null ? "null" : asset.Name);
+        Check("Gitee：不把 .sig 当成主程序",
+            asset != null && !asset.Name.EndsWith(".sig", StringComparison.OrdinalIgnoreCase));
+
+        Check("Gitee：仍能从发行说明里提取 SHA256",
+            ReleaseInfoParser.TryExtractExpectedSha256(release.Body)
+                == "F8CF4CB4CC73FB171731F7161437A79BDADB571FFBD4FC681D97B055C0CF288B");
+    }
+
+    /// <summary>构造候选版本的辅助。</summary>
+    private static UpdateCandidate MakeCandidate(string name, bool domestic, string version, string url)
+    {
+        return new UpdateCandidate
+        {
+            SourceName = name,
+            IsDomestic = domestic,
+            Version = new Version(version),
+            AssetName = "SeewoOpt.exe",
+            DownloadUrl = url
+        };
+    }
+
     private static void Check(string name, bool ok)
     {
         Check(name, ok, null);
