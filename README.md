@@ -1,4 +1,4 @@
-# 陈叔叔希沃优化工具 (SeewoOptimizer)
+# 陈叔叔希沃优化助手 (SeewoOptimizer)
 
 **PEACE & LOVE | 川中计算机协会 荣誉出品**
 
@@ -6,13 +6,15 @@
 
 ## 📖 简介
 
-陈叔叔希沃优化工具是一款专为**老希沃/多媒体教室环境**设计的轻量级系统优化工具。它解决了多媒体设备常见的三大痛点：
+陈叔叔希沃优化助手是一款面向**老希沃 / 多媒体教室**的轻量级 Windows 桌面工具。它最早是为了解决三件在教室里反复发生的事：
 
-- **系统时间不准确**（因主板电池失效或 Windows Time 服务异常）
-- **音量过小老师不会调导致同学们不能愉快地观看课件内视频**（不知道要退出ppt调系统时间）
-- **WPS 2019无法打开课件**（需要结束wps.exe进程再打开课件）
+- 主板电池失效或 Windows Time 服务异常，**系统时间停在 2000 年**；
+- 老师不会调音量，课件里的视频声音太小；
+- WPS 2019 打不开课件，要先结束残留的 WPS 进程。
 
-本工具完全**绿色、静默、自动**，无需用户干预即可完成时间同步、音量调节和进程清理，并支持开机自启和自动更新。
+现在它还包括**定时关机**、**守护天数**、常驻托盘、开机自启，以及带签名校验的自动更新。程序绿色免安装，不往系统目录写东西，设置存在当前用户的注册表里；首次运行会在 exe 同目录释放任务计划依赖的 DLL。
+
+> **默认不会在启动时自动执行任务。** 全新安装后程序停在「已就绪，点击开始执行」，避免空教室的一体机被远程唤醒或课间重启后自己动起来。想恢复“开机自动跑”，在设置里勾选「程序启动时自动开始执行既定任务」即可。
 
 ---
 
@@ -20,25 +22,31 @@
 
 | 功能 | 说明 |
 |------|------|
-| 🕐 **NTP 时间同步** | 内置 10 个国内外 NTP 服务器（阿里云、苹果、谷歌、NIST 等），自动重试、支持多阶段切换 |
-| 🔊 **系统音量调节** | 可自定义开机音量百分比，调用 Windows Core Audio API 直接调节主音量 |
-| 🧹 **结束 WPS 进程** | 一键清理 wps.exe |
-| 🔄 **开机自启** | 通过 Windows 任务计划实现用户登录后自动启动（无需管理员权限） |
-| 🤫 **静默启动** | 启动后自动隐藏到系统托盘，不干扰日常使用 |
-| 📦 **自动更新** | 后台检测 GitHub Releases，静默下载并替换，无弹窗无打扰 |
-| 📝 **详细日志** | 所有操作记录在 `%LOCALAPPDATA%\SeewoOpt\startup.log` |
-| 🧹 **一键卸载** | 输入暗号 `0319` 后清理所有日志、注册表、任务计划（需手动删除 exe） |
-| 🌐 **开源仓库** | 内置跳转按钮，一键访问 GitHub 源码 |
+| 🕐 **NTP 时间同步** | 10 个时间服务器，国内源优先（阿里云、国家授时中心、`cn.pool.ntp.org`），境外源兜底；校验 Mode / Stratum / 闰秒标志，失败自动切换 |
+| ⏰ **定时关机** | 最多 5 个时间点，可设为每天或指定星期；关机前 5 分钟弹提醒，到点立即执行；错过 10 分钟内会补执行 |
+| 📅 **守护天数** | 窗口顶部显示「已守护本电脑 x 天」；首次运行当天算第 0 天，只在时间同步成功后刷新 |
+| 🔊 **系统音量调节** | 可设置 0–100 的目标音量，调用 Windows Core Audio API 直接调主音量（默认 60%） |
+| 🧹 **结束 WPS 进程** | 清理 `wps` / `wpp` / `et` / `wpscloudsvr` / `ksolaunch` |
+| 🔄 **开机自启** | 通过 Windows 任务计划实现用户登录后延迟 5 秒启动，无需管理员权限 |
+| 🤫 **静默启动** | 启动后不显示窗口，直接进托盘 |
+| ▶️ **启动自动执行** | 可选开关，默认关闭；从旧版升级的机器会自动勾选，保持原来的使用习惯 |
+| 📌 **常驻托盘** | 同步完成后不退出，继续守候关机时间点；点 × 只缩托盘，退出走菜单或托盘 |
+| 📦 **自动更新** | 后台检测 GitHub Releases，下载后校验 RSA 发布签名，静默替换；时钟错误导致失败时会在校时后重试 |
+| 📝 **分段日志** | 每次运行单独分段，保留最近 5 次；记录在 `%LOCALAPPDATA%\SeewoOpt\startup.log` |
+| 🧹 **一键卸载** | 输入暗号 `0319` 后清理数据目录、注册表、任务计划，并停止关机守候（exe 需手动删除） |
 
 ---
 
-## 🖼️ 界面预览
+## 🖼️ 界面
 
-<img width="902" height="603" alt="image" src="https://github.com/user-attachments/assets/eb8472c0-d447-49ef-b3aa-f8ab705af9ac" />
+<img width="902" height="603" alt="主窗口" src="https://github.com/user-attachments/assets/eb8472c0-d447-49ef-b3aa-f8ab705af9ac" />
 
+> 截图可能滞后于最新版本，以实际界面为准。
 
-- 主窗口实时显示同步日志
-- 右下角按钮支持：重新同步、显示窗口、隐藏到托盘、GitHub仓库、卸载程序
+- 上半屏是「已守护本电脑 x 天」，下半屏是执行日志与状态行。
+- 底部按钮：**开始执行 / 重新同步 / 隐藏到托盘 / GitHub 仓库 / 卸载程序**；从托盘恢复时还会出现「显示窗口」。
+- 菜单栏：**选项**（设置、退出）、**日志**（打开日志）。
+- 托盘右键：**显示窗口 / 立即同步时间 / 退出程序**。
 
 ---
 
@@ -46,115 +54,79 @@
 
 ### 1. 首次运行
 
-从[Release发布页](https://github.com/Foxelf-Studio/SeewoOptimizer/releases)下载最新版，放到任意一个文件夹，双击 `SeewoOpt.exe`，程序将自动：
+从 [Release 发布页](https://github.com/Foxelf-Studio/SeewoOptimizer/releases) 下载最新版，放到任意文件夹，双击 `SeewoOpt.exe`。
 
-- 添加计划任务开机自启
-- 调节系统音量（默认 60%）
-- 结束 WPS 进程
-- 从多个 NTP 服务器同步时间（自动选择可用服务器）
-- 同步成功后自动隐藏到系统托盘
-- 后台检测新版本
+首次启动会：
 
-### 2. 设置选项
-点击菜单栏 **文件 → 设置** 打开设置窗口：
+1. 按「开机自启」设置（默认开启）创建登录任务；
+2. 显示主窗口，停在「已就绪，点击左下角开始执行」；
+3. 在后台检查一次新版本。
 
-<img width="666" height="661" alt="image" src="https://github.com/user-attachments/assets/b540bb74-806d-47de-8b76-c4aa9c2d5045" />
+点击左下角 **开始执行** 后，才会依次执行：
 
+- 调节系统音量（默认 60%）；
+- 结束 WPS 相关进程；
+- 从 NTP 服务器同步时间；
+- 同步成功后刷新守护天数，并缩到托盘常驻；
+- 如果启动时那次更新检查因时钟错误失败，校时成功后自动重试。
 
-| 选项 | 说明 |
-|------|------|
-| 开机自启 | 登录后自动启动（通过任务计划实现） |
-| 静默启动 | 启动时不显示主窗口，直接最小化到托盘 |
-| 自动调节音量 | 勾选后每次启动将音量设为指定值（0-100） |
-| 结束 WPS 进程 | 勾选后启动时自动清理 WPS 进程 |
+> 从 v26.6.9 及更早版本升级的机器会自动勾选「启动时自动执行」，保持原来“开机就自己跑”的体验；全新安装默认不勾。
 
-设置自动保存到注册表 `HKCU\Software\TimeSyncTool`。
+### 2. 设置
 
-### 3. 手动同步
+菜单栏 **选项 → 设置**：
 
-点击 **重新同步** 按钮可再次执行时间同步流程。
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| 开机自启动 | 开 | 登录后延迟 5 秒启动（任务计划） |
+| 静默启动 | 关 | 启动时不显示主窗口，直接进托盘 |
+| 程序启动时自动开始执行既定任务 | 关 | 勾选后启动 2 秒自动点一次「开始执行」 |
+| 自动执行音量调节 | 开 | 执行时把主音量设为右侧数值（0–100） |
+| 自动执行结束 WPS 进程任务 | 开 | 执行时清理 WPS 相关进程 |
+| 定时关机 | 空 | 最多 5 条；每条含时间、「每天」开关与七个星期按钮；关机前 5 分钟提醒 |
 
-### 4. 查看日志
+设置保存在注册表 `HKCU\Software\TimeSyncTool`。注册表路径与任务计划名**刻意保留** `TimeSyncTool`，避免老用户升级后设置丢失、自启任务失联。
 
-菜单栏 **视图 → 打开日志** 将自动打开日志文件夹并选中日志文件。
+### 3. 开始 / 重新同步
 
-### 5. 验证守护天数
+- 首次使用点 **开始执行**；
+- 之后可点 **重新同步**，或托盘菜单 **立即同步时间**；
+- 同步失败不会退出程序，网络恢复后可再次点击；
+- 权限不足时会提示以管理员身份重启。
 
-"已守护 x 天"只在**跨过午夜**时才 +1，当天无法自然验证；而且天数
-**只在时间同步成功后**才刷新（时钟不可信时算出的天数是错的，见
-`Services/GuardDayPolicy.cs`）。所以按下面的方法来测。
+### 4. 托盘与退出
 
-天数起点存在注册表 `HKCU\Software\TimeSyncTool` 的 `FirstRunDate`
-（REG_SZ，格式 `yyyy-MM-dd`）。改它、再点一次 **重新同步**，即可立刻看到结果——
-无需重启、无需改系统时间。
+- 点窗口右上角 **×** 只缩到托盘，程序继续守候关机时间点；
+- 托盘图标双击恢复窗口；
+- 真正退出只有两条路：**选项 → 退出**、托盘 **退出程序**；
+- 配了关机时间点时，退出前会提示“退出后关机时间点将不再生效”。
 
-> `HKCU` 是命令行里的缩写，注册表编辑器（regedit）里它的全名是
-> **HKEY_CURRENT_USER**。想用图形界面就展开
-> `HKEY_CURRENT_USER → Software → TimeSyncTool`；
-> 但下面的命令行方式更快、不会点错（`HKCU` 在 cmd 里直接可用）。
-> 键不存在时 `reg add` 会自动创建。
+### 5. 查看日志
 
-**开始前先看一眼当前状态**（这条也会告诉你注册表里到底有什么）：
+菜单栏 **日志 → 打开日志** 会打开数据目录并选中 `startup.log`。日志按运行分段，保留最近 5 次；被强杀的那次没有结束标记，一眼能看出上次是异常终止。
 
-```cmd
-reg query "HKCU\Software\TimeSyncTool"
-```
+### 6. 卸载
 
-**① 验证正常递增**
+点击 **卸载程序** → 输入暗号 `0319` → 确认后：
 
-把起始日设为**昨天**（下例假设今天是 2026-10-11）：
+- 先停止关机巡检并清空规则；
+- 删除 `%LOCALAPPDATA%\SeewoOpt`（日志、关机记账、更新缓存）；
+- 顺带清理旧版遗留的 `%LOCALAPPDATA%\TimeSyncTool`；
+- 删除注册表 `HKCU\Software\TimeSyncTool`；
+- 删除任务计划 `TimeSyncTool`。
 
-```cmd
-reg add "HKCU\Software\TimeSyncTool" /v FirstRunDate /t REG_SZ /d 2026-10-10 /f
-```
+程序 exe 与 `Microsoft.Win32.TaskScheduler.dll` 需手动删除（运行中无法自删）。
 
-点 **重新同步** → 同步成功后界面应显示 **第 1 天**，日志出现
-`守护天数已刷新：第 1 天`。
+---
 
-**② 验证错误起点会被自动修正**（复现历史上的"9781 天"缺陷）
+## ⚠️ 行为说明
 
-```cmd
-reg add "HKCU\Software\TimeSyncTool" /v FirstRunDate /t REG_SZ /d 2000-01-01 /f
-reg delete "HKCU\Software\TimeSyncTool" /v LastKnownGuardedDays /f
-```
-
-重启程序 → 界面显示占位文案「正在确认守护天数…」，**不会出现 9781**
-（时钟不准时不再现算）。点 **重新同步** → 应显示 **第 0 天**，日志出现：
-
-```
-守护起始日期 2000-01-01 早于本功能上线日（2026-10-10），不可能成立，已重置为 2026-10-11
-守护天数已刷新：第 0 天
-```
-
-把日期改成**明天**可测另一条分支，日志会写"晚于今天…已重置"。
-
-**③ 验证时钟不准时不会算出假数字**
-
-把系统时间改到 2000-01-01，重启程序、**先不要同步**：
-界面应显示上次确认过的值（全新安装时是占位文案），
-而不是按 2000 年算出来的天文数字。此时再同步，应显示第 0 天。
-
-> **注意**：起始日早于 `2026-10-10`（守护天数功能上线日）一律会被判为
-> 不可信并重置。所以手工填一个很早的日期走的是 ② 那条重置路径，
-> 想看"较大的天数"只能靠真实时间累积。
-
-**恢复**：把 `FirstRunDate` 改回首次运行的日期，或删掉该值重新开始：
-
-```cmd
-reg delete "HKCU\Software\TimeSyncTool" /v FirstRunDate /f
-reg delete "HKCU\Software\TimeSyncTool" /v LastKnownGuardedDays /f
-```
-
-### 6. 卸载程序
-
-点击 **卸载程序** 按钮 → 输入暗号 `0319` → 确认后自动删除：
-
-- 日志目录
-- 更新缓存目录
-- 注册表项 `HKCU\Software\TimeSyncTool`
-- 开机自启任务计划
-
-**注意**：程序 exe 文件需手动删除（运行中无法自删）。
+- **默认不自动执行**：全新安装后需要点一次「开始执行」，或在设置里勾选自动执行。
+- **关机补执行**：关机点后 10 分钟内恢复（休眠唤醒、重启、卡顿），会补关一次；超过 10 分钟放弃并写日志。补执行不弹确认框——提前 5 分钟的提醒框是唯一确认窗口。
+- **关机状态跨重启**：承诺时刻、本次不关机标记、已执行标记写在 `shutdown-state.txt`；重启后会恢复。**“已提醒”不落盘**，所以在提醒窗口内重启（且未点过“本次不关机”）会再问一次，并把承诺顺延为「现在 + 5 分钟」。
+- **任务管理器结束任务会被拦截**，防止学生绕过关机管理；系统关机/注销会正常放行，不会出现「此程序正在阻止 Windows 关闭」。
+- **数据目录与标识**：数据目录是 `%LOCALAPPDATA%\SeewoOpt`；注册表与任务计划名仍是 `TimeSyncTool`。判断“能不能改名”的标准是有没有不可再生的用户数据，而不是名字像不像内部代号。
+- **运行环境**：Windows 7 SP1 及以上，.NET Framework **4.8**。
 
 ---
 
@@ -162,74 +134,65 @@ reg delete "HKCU\Software\TimeSyncTool" /v LastKnownGuardedDays /f
 
 ### 1. 时间同步（NTP）
 
-```mermaid
-graph LR
-    A[启动] --> B[尝试主服务器]
-    B -->|失败| C[尝试备用服务器]
-    B -->|成功| D[设置系统时间]
-    C -->|成功| D
-    D --> E[同步完成]
-```
+- UDP 123 端口，48 字节 NTPv4 报文，解析 `transmit timestamp`。
+- 校验 **Mode = 4（服务器应答）**、**Stratum 1–15**、**Leap Indicator ≠ 3**；不合格的响应直接丢弃。
+- 时间合理性只用绝对边界（2000-01-01 ~ 2036-02-07），**不拿本机时钟做判断**——本机时钟本来就是待修对象。
+- 每次查询连发 2 个 UDP 包，连接、发包、收包共用一个 5 秒总预算；前 4 个是国内源，全部失败后才用境外备用源。
+- 写入系统时间用 `SetSystemTime`（收 UTC），**不做任何时区换算**；需要显示本地时间时才用 `ToLocalTime`。
 
-- 使用 UDP 协议连接 NTP 服务器（端口 123）
-- 解析 NTP 协议包中的 `transmit timestamp` 字段
-- 转换为本地时间（东八区）并通过 `SetLocalTime` API 设置
-- 支持多阶段重试（第一阶段最多 3 次，第二阶段最多 3 次）
+### 2. 定时关机
 
-### 2. 音量调节
+- 每 20 秒巡检一次，**到点窗口优先于提醒窗口**。
+- 提醒窗口 5 分钟；提醒弹出时把承诺定成 `max(现在 + 5 分钟, 规则时刻)`，保证用户看到满 5 分钟。
+- 到点后 10 分钟内补执行；超过则放弃。承诺、跳过、已执行三笔账写入 `%LOCALAPPDATA%\SeewoOpt\shutdown-state.txt`。
+- 关机命令通过 `%SystemRoot%\System32\shutdown.exe` 绝对路径执行，参数 `/s /t 0`，不叠加系统倒计时。
 
-- 通过 Core Audio API 获取默认音频渲染设备
-- 调用 `IAudioEndpointVolume::SetMasterVolumeLevelScalar` 设置主音量（0.0 - 1.0）
+### 3. 音量与 WPS 清理
 
-### 3. 开机自启
+- 音量：Core Audio API，取默认渲染设备后调 `SetMasterVolumeLevelScalar`（0.0–1.0）。
+- WPS：结束 `wps` / `wpp` / `et` / `wpscloudsvr` / `ksolaunch`，每个 `Process` 对象用完即释放，并等待进程真正退出。
 
-- 使用 `Microsoft.Win32.TaskScheduler` 库创建任务计划
-- 触发器：用户登录时，延迟 5 秒启动
-- 优点：无需管理员权限，不受杀毒软件拦截
+### 4. 开机自启
 
-### 4. 自动更新
+- 使用 `Microsoft.Win32.TaskScheduler` 创建任务计划，触发器为“用户登录后延迟 5 秒”，动作为当前 exe。
+- 启动时会检查任务是否存在，与设置不一致时自动修正（用户可能在任务计划程序里手动删过）。
+
+### 5. 自动更新
 
 ```mermaid
 sequenceDiagram
     participant P as 程序
     participant G as GitHub API
     participant D as 下载服务器
-    participant B as 批处理脚本
+    participant B as 更新脚本
 
-    P->>G: 请求最新 release
-    G-->>P: 返回 JSON
-    P->>P: 正则提取 tag_name 和下载地址
-    alt 发现新版本
-        P->>D: 下载新 exe
-        D-->>P: 下载完成
-        P->>B: 创建 update.bat
-        P->>B: 启动脚本并退出
-        B->>B: 等待2秒后替换文件
-        B->>B: 清理临时文件并自删除
+    P->>G: GET /releases/latest
+    G-->>P: JSON
+    P->>P: DataContractJsonSerializer 解析，按扩展名选 exe
+    alt 版本更高
+        P->>D: 下载 exe（60 秒预算）
+        P->>D: 下载 .sig（30 秒预算）
+        P->>P: PE 头 + RSA 发布签名校验
+        P->>B: 启动 UpdateScriptLauncher
+        P->>P: 释放互斥体并退出
+        B->>B: 备份 → 替换（失败回滚，最多 5 次）
     end
 ```
 
-- 使用 `WebClient` 下载，支持进度回调
-- 30 秒超时控制，失败自动重试 3 次
-- 批处理脚本静默替换，不弹出命令行窗口
-- 更新完成后程序自动退出，下次启动即为新版本
+- Release 用 `DataContractJsonSerializer` 解析，不再用正则；资产按 `.exe` / `.msi` 筛选，排除 `.sig` 等附属文件。
+- **签名是唯一的信任锚**：RSA / PKCS#1 v1.5 / SHA-256；SHA256 只记录，不阻止更新（它和文件来自同一个响应，挡不住仓库被入侵）。
+- 更新脚本把路径转义后写进批处理，不再通过环境变量传递；替换前备份旧 exe，失败自动回滚并写 `UPDATE_FAILED`，下次启动会记一条明确的失败日志并清理标记。
+- 时钟错误会让 HTTPS 证书校验失败；启动时那次更新检查失败后，会在时间同步成功后自动重试，等待上限 60 秒。
 
-### 5. 单实例控制
+### 6. 单实例与退出
 
-- 使用全局互斥体 `TimeSyncTool_UniqueMutex` 防止多开
-- 程序退出时自动释放（无需手动释放，避免跨线程异常）
+- 全局互斥体 `TimeSyncTool_UniqueMutex` 防止多开；抢不到实例时只弹提示，不碰日志文件。
+- 所有退出路径统一走 `Program.Shutdown()`：先等后台同步线程收尾，再释放互斥体、写日志结束标记，最后退出。
 
-### 6. 卸载清理
+### 7. 日志
 
-- 删除 `%LOCALAPPDATA%\SeewoOpt`（日志、关机记账与更新缓存）
-- 顺带清理旧版本遗留的 `%LOCALAPPDATA%\TimeSyncTool`
-- 删除注册表 `HKCU\Software\TimeSyncTool`
-- 删除任务计划 `TimeSyncTool`
-- 需要输入暗号 `0319` 确认，防止老师看它不顺眼卸载了
-
-> 注册表项与任务计划名保留 `TimeSyncTool`，是因为它们是**已经写入系统的
-> 外部键**——改名会让老用户已保存的设置被重置、已注册的自启任务失联。
-> 数据目录只存日志、关机记账（`shutdown-state.txt`）与可再生的更新缓存，不含用户配置，因此已改名为 `SeewoOpt`。
+- 每次启动写分隔头与运行序号，结束写结束标记；只保留最近 5 次。
+- 写入用 UTF-8 无 BOM，多线程写入加锁；超长消息截断到 4000 字符。
 
 ---
 
@@ -237,33 +200,43 @@ sequenceDiagram
 
 ```
 SeewoOptimizer/
-├── WindowsFormsApp1/            # 主工程（net48 WinForms，非 SDK-style）
-│   ├── Program.cs               # 程序入口、单实例、DLL 提取
-│   ├── MainForm.cs              # 主窗体
-│   ├── SettingsForm.cs          # 设置窗体
-│   ├── Properties/
-│   │   ├── AssemblyInfo.cs      # 版本号在这里
-│   │   └── app.manifest
+├── WindowsFormsApp1/                     # 主工程（net48 WinForms，非 SDK-style）
+│   ├── Program.cs                        # 入口、单实例、自动更新、DLL 提取
+│   ├── Properties/TimeSyncForm.cs        # 主窗体、托盘、同步流程、关机巡检
+│   ├── SettingsForm.cs                   # 设置窗体（含关机时间点编辑）
+│   ├── ShutdownWarningDialog.cs          # 关机提醒自绘对话框
 │   ├── Services/
-│   │   ├── NtpClient.cs         # NTP 协议解析（纯函数，可单测）
-│   │   ├── AutoStartService.cs  # 任务计划开机自启
-│   │   ├── SettingsStore.cs     # 注册表设置持久化
-│   │   ├── UpdateService.cs     # GitHub Releases 自动更新
-│   │   └── ...
-│   ├── Microsoft.Win32.TaskScheduler.dll   # 任务计划依赖（内嵌资源）
-│   └── well.ico                 # 程序图标（嵌入资源）
+│   │   ├── NtpClient.cs                  # NTP 解析、查询、系统时间写入
+│   │   ├── ShutdownSchedule.cs           # 关机规则、星期掩码、提醒/到点判定
+│   │   ├── ShutdownService.cs            # 关机巡检、承诺/跳过记账、执行 shutdown
+│   │   ├── SettingsStore.cs              # 注册表设置持久化、读改写串行化
+│   │   ├── LogService.cs                 # 分段日志、裁剪
+│   │   ├── GuardDayPolicy.cs             # 守护起始日可信度判定
+│   │   ├── SignatureVerifier.cs          # 发布签名验证（多公钥）
+│   │   ├── ReleaseInfoParser.cs          # Release JSON 解析与资产筛选
+│   │   ├── UpdateScriptLauncher.cs       # 更新脚本生成与启动
+│   │   ├── AutoStartService.cs           # 任务计划开机自启
+│   │   ├── AutoStartTaskUpgradePolicy.cs # 旧版升级时补勾自动执行
+│   │   ├── ProcessCleaner.cs             # 结束 WPS 进程
+│   │   ├── VolumeController.cs           # Core Audio 音量
+│   │   ├── SessionClosePolicy.cs         # 系统关机/注销放行策略
+│   │   └── BuildInfo.cs                  # BuildId + exe SHA256 + 写入时间
+│   ├── Microsoft.Win32.TaskScheduler.dll # 任务计划依赖（内嵌资源）
+│   └── well.ico                          # 程序图标（嵌入资源）
 ├── WindowsFormsApp1.sln
-├── tools/                       # 构建辅助（本地构建用，CI 不需要）
-│   ├── sync.cmd                 # 源码镜像：仓库 -> 本机构建工位
-│   ├── build.cmd                # 同步 + 编译
-│   ├── publish.cmd              # 同步 + 编译 + 签名 + 公钥自检
-│   ├── Directory.Build.props    # 让各工具工程各用独立 obj（避免相互覆盖）
-│   ├── NtpClientTests.cs(.csproj)      # 单元测试：NTP 协议 / 关机调度 / 守护天数 / 设置序列化
-│   ├── DialogRender.cs(.csproj)        # 把关机提醒框渲染成 PNG，供人眼核对
-│   ├── ShutdownSessionProbe.cs(.csproj) # 关机/注销链路探针：真实收发窗口消息
-│   ├── UpdateLaunchProbe.cs(.csproj)   # 更新链路的替换演练：真实模板 + 真实进程
-│   └── UpgradeMigrationProbe.cs(.csproj) # 升级迁移探针：真实注册表全生命周期（自带备份/恢复）
-└── .github/workflows/build.yml  # CI：编译校验 + 跑单元测试
+├── tools/                                # 测试、探针、构建脚本
+│   ├── sync.cmd / build.cmd / publish.cmd
+│   ├── NtpClientTests.cs                 # 单元测试：NTP / 关机 / 守护天数 / 设置 / 签名
+│   ├── ShutdownSessionProbe.cs           # 关机链路探针（真实窗口消息）
+│   ├── UpdateLaunchProbe.cs              # 更新替换演练（真实模板 + 真实进程）
+│   ├── UpgradeMigrationProbe.cs          # 升级迁移演练（真实注册表，可回滚）
+│   ├── UpdateRetrySimulation.cs          # 更新重试时序模拟
+│   ├── DialogRender.cs                   # 把提醒框渲染成 PNG，供人眼核对
+│   └── Directory.Build.props             # 各工具工程独立 obj
+├── docs/verify-guard-days.md             # 守护天数手工验证步骤
+├── .github/workflows/build.yml           # CI：编译 + 单测 + 探针 + tag 校验
+├── RELEASING.md                          # 发布流程与密钥轮换
+└── LICENSE
 ```
 
 ---
@@ -273,60 +246,56 @@ SeewoOptimizer/
 ### 环境要求
 
 - Windows 7 SP1 或更高版本
-- .NET Framework **4.8**（运行时）；编译目标同为 4.8
+- .NET Framework **4.8**（运行时与编译目标）
+- Visual Studio 2022，或能提供 net48 参考程序集的 MSBuild 环境
 
-### 编译步骤
+### 用 Visual Studio 2022
 
-**推荐：用仓库自带脚本**（无需安装 Visual Studio）
+1. 克隆仓库：
+   ```bash
+   git clone https://github.com/Foxelf-Studio/SeewoOptimizer.git
+   ```
+2. 打开 `WindowsFormsApp1.sln`；
+3. 还原 NuGet 包（只需 `TaskScheduler 2.12.2`）；
+4. 编译 Release / AnyCPU；
+5. 运行 `WindowsFormsApp1\bin\Release\SeewoOpt.exe`。
 
-```bash
-cd tools
-build.cmd              # Release（默认）
-build.cmd Debug        # Debug
+### 命令行
+
+```bat
+dotnet build WindowsFormsApp1\WindowsFormsApp1.csproj ^
+  -c Release ^
+  -p:TargetFrameworkRootPath=<net48 参考程序集根目录>
 ```
 
-脚本会先把仓库源码镜像到构建工位，再编译。
-首次使用需先参照 `tools/` 脚本内的路径注释准备好参考程序集与 NuGet 包。
+命令行编译前需要先还原 `packages.config` 里的 `TaskScheduler 2.12.2`，并把参考程序集根目录指到含 `.NETFramework\v4.8` 的那一层。
 
-**或者：用 Visual Studio 2022**
-
-1. 克隆仓库
-```bash
-git clone https://github.com/Foxelf-Studio/SeewoOptimizer.git
-```
-2. 用 Visual Studio 2022 打开 `WindowsFormsApp1.sln`
-3. 还原 NuGet 包
-4. 编译生成（Release / AnyCPU）
-5. 运行 `bin\Release\SeewoOpt.exe`
+`tools/build.cmd` / `publish.cmd` 是维护者本机构建工位的脚本：它们假定仓库位于 `<构建根>\_repo`，并镜像到 `G:\SeewoBuild\proj`，再使用本机自备的参考程序集与 NuGet 包。普通克隆直接用 Visual Studio 即可；维护者的完整流程见 [RELEASING.md](RELEASING.md)。
 
 ### 自动化校验
 
-CI 在每次 push / PR 时自动编译并跑单元测试，见 `.github/workflows/build.yml`。
-本地也可以单独跑 `tools/` 下的测试工程，验证 NTP 协议解析逻辑。
+CI 在每次 push / PR / `v*` 标签时运行：编译 net48、跑单元测试与关机/更新/升级迁移三个探针；标签构建还会校验 **tag 与产物 FileVersion 一致**。
 
 ```bash
 cd tools
-dotnet run --project NtpClientTests.csproj        # 单元测试，输出"通过 N 项，失败 M 项"
-dotnet run --project ShutdownSessionProbe.csproj  # 关机链路探针，退出码 0=通过
-dotnet run --project DialogRender.csproj          # 渲染提醒框 PNG 到 bin/Release/net48/render/
-dotnet run --project UpdateLaunchProbe.csproj     # 更新替换演练，退出码 0=通过
-dotnet run --project UpgradeMigrationProbe.csproj # 升级迁移演练（真实注册表，可回滚）
+dotnet run --project NtpClientTests.csproj -c Release        # 228 项断言
+dotnet run --project ShutdownSessionProbe.csproj -c Release   # 关机链路探针，退出码 0=通过
+dotnet run --project DialogRender.csproj -c Release           # 渲染提醒框 PNG
+dotnet run --project UpdateLaunchProbe.csproj -c Release      # 更新替换演练
+dotnet run --project UpgradeMigrationProbe.csproj -c Release  # 升级迁移演练（真实注册表，可回滚）
 ```
 
-**关于 `ShutdownSessionProbe`**：它验证的是"窗口消息层"的行为——
-系统关机时本程序是否会被判定为「阻止 Windows 关闭」。
-这类缺陷不存在于任何纯函数里，单元测试测不到，只能用真实窗体 + 真实
-`SendMessage`（投递 `WM_QUERYENDSESSION` / `WM_SYSCOMMAND(SC_CLOSE)`）
-直接读回窗口过程的返回值。探针以退出码报告结果，可直接接进自动化。
+**关于 `ShutdownSessionProbe`**：它验证的是“窗口消息层”的行为——系统关机时本程序是否会被判定为「阻止 Windows 关闭」。这类缺陷不在纯函数里，单元测试测不到，只能用真实窗体 + 真实 `SendMessage` 投递 `WM_QUERYENDSESSION` / `WM_SYSCOMMAND(SC_CLOSE)`，直接读回窗口过程的返回值。
 
-**关于 `UpgradeMigrationProbe`**：升级迁移的正确性取决于"用户机器上到底
-有没有旧版本的设置键"，这是纯逻辑测不出来的。它在临时键上跑一遍完整
-生命周期——伪造旧版安装 → 跑迁移 → 校验结果 → 删除临时键，涵盖
-"老用户被补勾"与"全新安装不被误判"两条路径，结束时**必定清理**，
-不会在运行 CI 的机器上留下残留。
+**关于 `UpgradeMigrationProbe`**：它在临时注册表键上跑完整生命周期——伪造旧版安装 → 跑迁移 → 校验结果 → 删除临时键，涵盖“老用户被补勾”与“全新安装不被误判”两条路径，结束时必定清理。
 
-> **注意**：CI 只做编译校验，不发布产物——发布需要对 exe 用本机私钥签名，
-> 而私钥绝不能上传到云端。
+> CI 只做编译与测试校验，不发布产物——发布需要对 exe 用本机私钥签名，而私钥绝不能上传到云端。
+
+---
+
+## 📅 守护天数验证
+
+“已守护 x 天”只在**跨过午夜**时 +1，而且只在**时间同步成功后**才刷新，所以当天无法自然验证。完整的手工验证步骤（含注册表改法、错误起点复现、时钟不准的场景）见 [docs/verify-guard-days.md](docs/verify-guard-days.md)。
 
 ---
 
@@ -343,7 +312,7 @@ Copyright (C) 2025-2026 **Foxelf Studio**
 
 简单说：**拿去用可以，改了要开源，别把改进藏起来。**
 
-> 本项目为教学场景下的实用工具，按"现状"提供，不附带任何明示或暗示的担保。详见 LICENSE 第 15、16 条。
+> 本项目为教学场景下的实用工具，按“现状”提供，不附带任何明示或暗示的担保。详见 LICENSE 第 15、16 条。
 
 ---
 
