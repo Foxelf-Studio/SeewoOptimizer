@@ -19,6 +19,9 @@ name: 编译校验
 on:
   push:
     branches: [master]
+    # 标签也要跑：发布产物必须能从标签复现，
+    # 否则 tag 只是给 Release 页面看的装饰。
+    tags: ['v*']
   pull_request:
     branches: [master]
   # 允许手动触发，便于在不推送的情况下验证 workflow 本身
@@ -196,6 +199,28 @@ jobs:
             "| $($item.Name) | $($item.Length) 字节 | ``$hash`` |"
           ) -join "`n"
           [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, $md + "`n", $utf8NoBom)
+
+      # 【为什么这条校验必须有】
+      # v26.10.11 曾出现“标签落后发布产物 3 个提交”：Release 里的 exe 是好的，
+      # 但按标签构建出来的版本自更新必坏。标签一旦与产物脱节，
+      # “源码可复现”就是假的，排查也会被带偏。
+      # 这里读的是产物自己的 FileVersion，不信任源码里的版本号字符串。
+      - name: 校验 tag 与产物版本一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME -replace '^v',''
+          $exe = "WindowsFormsApp1\bin\Release\SeewoOpt.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "产物不存在: $exe"
+            exit 1
+          }
+          $ver = (Get-Item $exe).VersionInfo.FileVersion
+          if ($ver -ne $tag) {
+            Write-Error "标签是 v$tag，但产物 FileVersion 是 $ver。请把版本号改对后重新打标签，不要移动已发布的标签。"
+            exit 1
+          }
+          Write-Host "tag 与产物版本一致: v$ver"
 
       - name: 运行 NtpClient 协议解析测试
         shell: pwsh
