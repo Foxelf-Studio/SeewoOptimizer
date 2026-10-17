@@ -1,4 +1,7 @@
 using System;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using SeewoOpt.Services;
 
 /// <summary>
@@ -105,6 +108,9 @@ internal static class NtpClientTests
 
         // --- 设置规整（注册表可手改，界面限不住）---
         TestSettingsNormalizeClampsRuleCount();
+
+        // --- 签名信任链（换钥过渡）---
+        TestSignatureVerifierAcceptsSecondKey();
 
         // --- 畸形输入 ---
         TestRejectsShortPacket();
@@ -2279,6 +2285,61 @@ internal static class NtpClientTests
         Check("Normalize 把音量上限收到 100", v.VolumeLevel == 100, $"得到 {v.VolumeLevel}");
         v.VolumeLevel = -30; v.Normalize();
         Check("Normalize 把音量下限收到 0", v.VolumeLevel == 0, $"得到 {v.VolumeLevel}");
+    }
+
+    /// <summary>
+    /// 多公钥信任链：用第二把私钥签名的包，必须被“当前 + 下一把”接受。
+    ///
+    /// 【为什么必须有这条】换钥时旧客户端只认第一把；如果只支持单钥，
+    /// 新钥签的包会被所有旧客户端拒绝，而且补丁本身也发不出去。
+    /// 这条测试固定住“按顺序试每一把、命中第二把也算通过”的契约。
+    /// </summary>
+    private static void TestSignatureVerifierAcceptsSecondKey()
+    {
+        string file = null;
+        string sig = null;
+        try
+        {
+            using (RSA oldKey = RSA.Create(2048))
+            using (RSA newKey = RSA.Create(2048))
+            {
+                byte[] payload = Encoding.UTF8.GetBytes("seewo-update-payload");
+                file = Path.Combine(Path.GetTempPath(),
+                    "seewo-sig-" + Guid.NewGuid().ToString("N") + ".bin");
+                sig = file + ".sig";
+
+                File.WriteAllBytes(file, payload);
+                File.WriteAllBytes(sig, newKey.SignData(
+                    payload, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1));
+
+                string oldPub = Convert.ToBase64String(oldKey.ExportSubjectPublicKeyInfo());
+                string newPub = Convert.ToBase64String(newKey.ExportSubjectPublicKeyInfo());
+
+                SignatureCheckResult both = SignatureVerifier.VerifyWithKeys(
+                    file, sig, new[] { oldPub, newPub });
+                Check("第二把公钥签名的包应被接受",
+                    both.IsValid && both.KeyIndex == 1,
+                    both.Describe());
+
+                SignatureCheckResult oldOnly = SignatureVerifier.VerifyWithKeys(
+                    file, sig, new[] { oldPub });
+                Check("只信任旧公钥时必须拒绝新公钥签名",
+                    !oldOnly.IsValid,
+                    oldOnly.Describe());
+
+                File.WriteAllBytes(file, Encoding.UTF8.GetBytes("tampered"));
+                SignatureCheckResult tampered = SignatureVerifier.VerifyWithKeys(
+                    file, sig, new[] { oldPub, newPub });
+                Check("文件被改动后两把公钥都应拒绝",
+                    !tampered.IsValid,
+                    tampered.Describe());
+            }
+        }
+        finally
+        {
+            try { if (file != null && File.Exists(file)) File.Delete(file); } catch { }
+            try { if (sig != null && File.Exists(sig)) File.Delete(sig); } catch { }
+        }
     }
 
     /// <summary>构造规整用规则的辅助——只为凑数量，语义无关。</summary>

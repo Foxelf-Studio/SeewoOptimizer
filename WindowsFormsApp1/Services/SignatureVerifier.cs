@@ -7,17 +7,25 @@ namespace SeewoOpt.Services
     /// <summary>签名验证结果</summary>
     public class SignatureCheckResult
     {
+        public SignatureCheckResult()
+        {
+            KeyIndex = -1;
+        }
+
         /// <summary>签名是否有效</summary>
         public bool IsValid { get; set; }
 
         /// <summary>失败时的原因说明</summary>
         public string FailureReason { get; set; }
 
+        /// <summary>命中第几把受信任公钥（从 0 开始；-1 表示未命中）</summary>
+        public int KeyIndex { get; set; }
+
         /// <summary>可读的结论描述</summary>
         public string Describe()
         {
             if (IsValid)
-                return "签名有效（RSA-3072 / PKCS#1 v1.5 / SHA-256）";
+                return "签名有效（RSA / PKCS#1 v1.5 / SHA-256，受信任公钥 #" + (KeyIndex + 1) + "）";
 
             return "签名无效" + (string.IsNullOrEmpty(FailureReason) ? "" : "：" + FailureReason);
         }
@@ -36,7 +44,7 @@ namespace SeewoOpt.Services
     ///
     /// 【信任模型】
     /// - 私钥（private_key.pem）只存在于发布者本机，绝不提交仓库、不上传任何在线服务
-    /// - 公钥（下方 PUBLIC_KEY_BASE64）硬编码在本文件中，随程序分发给所有用户
+    /// - 公钥列表（下方 TrustedPublicKeysBase64）硬编码在本文件中，随程序分发给所有用户
     /// - 发布流程：用私钥对 exe 签名生成 exe.sig → exe 与 exe.sig 一起上传 Release
     /// - 验证流程：程序用内置公钥验证签名 → 通过才替换自身
     ///
@@ -58,11 +66,23 @@ namespace SeewoOpt.Services
     public static class SignatureVerifier
     {
         /// <summary>
-        /// 发布者公钥（RSA-3072，SubjectPublicKeyInfo / X.509 格式，Base64）。
-        /// 重新生成密钥对后需替换本常量，导出命令：
+        /// 发布者公钥列表（SubjectPublicKeyInfo / X.509 格式，Base64）。
+        ///
+        /// 【为什么是数组而不是单个常量】
+        /// 自更新客户端只信任编译进 exe 的公钥。若只硬编码一把，换钥那天
+        /// 所有旧客户端都会拒绝新版本，而且补丁本身也发不出去——
+        /// 更新链路永久中断。数组允许“当前 + 下一把”同时受信：
+        ///   1. 先用旧钥签一版带新公钥的客户端；
+        ///   2. 确认用户已升级后，再用新钥签名发布；
+        ///   3. 过渡期结束，删掉旧钥。
+        /// 顺序不能反：新钥必须先随一版客户端发出去，旧客户端才认识它。
+        ///
+        /// 导出命令：
         ///   openssl rsa -in private_key.pem -pubout -outform DER | base64 -w 0
         /// </summary>
-        private const string PUBLIC_KEY_BASE64 =
+        private static readonly string[] TrustedPublicKeysBase64 =
+        {
+            // 2026-10 现行发布钥（RSA-3072）
             "MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAoH6IPFXuLtpBcuuJaWNq" +
             "DiskX1VjcFiDEOZvfBl+SVppZ29YL+YtRp0WN37ZTAHJJuEK+Pam7S2ylTWaZ35P" +
             "DRq0gN4MauSKQJf75MZSazvBjh7g22t/SB1Kr/RzSxHqv4pejXoZtwHbtA8uovcP" +
@@ -71,7 +91,9 @@ namespace SeewoOpt.Services
             "bzg8BcJ2eDZqE2Nnln6ukcc8F4dnxCDURPIrF2WVklSvho/HhJn+ft6veNRFf7bY" +
             "2WKKZbpEpxlr7Acw1oPZyg6lhDg9oLZDVyGCySiTz806ZDYzLiQSjg4JvUnAenYk" +
             "JqwlSOKBPqSbeI6nj6NtwTCIyGcreizVSCwDAVrZra7+gNLkR2B8x9CRyg2TKUjE" +
-            "9j+3dG18AJGQTWLo4YsvgSTZhwZeviJeKTsT8rbG/xUHAgMBAAE=";
+            "9j+3dG18AJGQTWLo4YsvgSTZhwZeviJeKTsT8rbG/xUHAgMBAAE=",
+            // 下一把公钥加在这里。加之前先确认“带它的这一版”已经发布出去。
+        };
 
 
         /// <summary>签名文件的扩展名</summary>
@@ -80,7 +102,15 @@ namespace SeewoOpt.Services
         /// <summary>公钥是否已配置</summary>
         public static bool EnforcementEnabled
         {
-            get { return !string.IsNullOrWhiteSpace(PUBLIC_KEY_BASE64); }
+            get
+            {
+                for (int i = 0; i < TrustedPublicKeysBase64.Length; i++)
+                {
+                    if (!string.IsNullOrWhiteSpace(TrustedPublicKeysBase64[i]))
+                        return true;
+                }
+                return false;
+            }
         }
 
         /// <summary>
@@ -89,6 +119,18 @@ namespace SeewoOpt.Services
         /// 无论成功失败都不抛异常。
         /// </summary>
         public static SignatureCheckResult Verify(string filePath, string signaturePath)
+        {
+            return VerifyWithKeys(filePath, signaturePath, TrustedPublicKeysBase64);
+        }
+
+        /// <summary>
+        /// 用指定的公钥集合验证签名。
+        ///
+        /// 抽出来是为了能测“第二把公钥”这条换钥路径：测试自己生成两对 RSA
+        /// 密钥并签名，不需要碰产品内置的那把真钥。
+        /// </summary>
+        internal static SignatureCheckResult VerifyWithKeys(
+            string filePath, string signaturePath, string[] publicKeysBase64)
         {
             var result = new SignatureCheckResult();
 
@@ -106,23 +148,61 @@ namespace SeewoOpt.Services
                     return result;
                 }
 
+                if (publicKeysBase64 == null || publicKeysBase64.Length == 0)
+                {
+                    result.FailureReason = "未配置任何受信任公钥";
+                    return result;
+                }
+
                 byte[] fileBytes = File.ReadAllBytes(filePath);
                 byte[] signatureBytes = File.ReadAllBytes(signaturePath);
 
-                bool ok;
-                using (RSA rsa = RSA.Create())
+                string lastKeyError = null;
+                bool sawUsableKey = false;
+
+                for (int i = 0; i < publicKeysBase64.Length; i++)
                 {
-                    ImportPublicKey(rsa);
-                    ok = rsa.VerifyData(
-                        fileBytes,
-                        signatureBytes,
-                        HashAlgorithmName.SHA256,
-                        RSASignaturePadding.Pkcs1);
+                    string keyBase64 = publicKeysBase64[i];
+                    if (string.IsNullOrWhiteSpace(keyBase64)) continue;
+                    sawUsableKey = true;
+
+                    try
+                    {
+                        bool ok;
+                        using (RSA rsa = RSA.Create())
+                        {
+                            ImportPublicKey(rsa, keyBase64);
+                            ok = rsa.VerifyData(
+                                fileBytes,
+                                signatureBytes,
+                                HashAlgorithmName.SHA256,
+                                RSASignaturePadding.Pkcs1);
+                        }
+
+                        if (ok)
+                        {
+                            result.IsValid = true;
+                            result.KeyIndex = i;
+                            return result;
+                        }
+                    }
+                    catch (Exception keyEx)
+                    {
+                        // 单把公钥损坏不应让整条链失效：继续试下一把。
+                        lastKeyError = keyEx.Message;
+                    }
                 }
 
-                result.IsValid = ok;
-                if (!ok)
-                    result.FailureReason = "签名与文件内容不匹配，文件可能已被篡改";
+                if (!sawUsableKey)
+                {
+                    result.FailureReason = "未配置任何受信任公钥";
+                }
+                else
+                {
+                    result.FailureReason = "签名与任何一把受信任公钥都不匹配，文件可能已被篡改";
+                    if (!string.IsNullOrEmpty(lastKeyError))
+                        result.FailureReason += "（最后一把公钥解析失败：" + lastKeyError + "）";
+                }
             }
             catch (CryptographicException ex)
             {
@@ -156,7 +236,12 @@ namespace SeewoOpt.Services
         /// <summary>导出公钥 Base64（供重新生成密钥时核对）</summary>
         public static string GetPublicKeyBase64()
         {
-            return PUBLIC_KEY_BASE64;
+            for (int i = 0; i < TrustedPublicKeysBase64.Length; i++)
+            {
+                if (!string.IsNullOrWhiteSpace(TrustedPublicKeysBase64[i]))
+                    return TrustedPublicKeysBase64[i];
+            }
+            return string.Empty;
         }
 
         /// <summary>
@@ -174,18 +259,16 @@ namespace SeewoOpt.Services
         ///   }
         /// 只取 modulus 与 exponent 导入 RSAParameters，algorithm 部分不参与验签。
         /// </summary>
-        private static void ImportPublicKey(RSA rsa)
+        private static void ImportPublicKey(RSA rsa, string publicKeyBase64)
         {
-            byte[] der = Convert.FromBase64String(PUBLIC_KEY_BASE64);
+            byte[] der = Convert.FromBase64String(publicKeyBase64);
 
-            int derLength = der.Length;
             int offset = 0;
 
             // 外层 SEQUENCE
             ReadTagAndLength(der, ref offset, out byte outerTag, out int outerContentLength);
             if (outerTag != 0x30)
                 throw new CryptographicException("公钥格式错误：缺少外层 SEQUENCE");
-            derLength = outerContentLength;
 
             // AlgorithmIdentifier（跳过）
             ReadTagAndLength(der, ref offset, out byte algTag, out int algLength);

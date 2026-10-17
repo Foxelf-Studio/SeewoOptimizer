@@ -174,6 +174,37 @@ namespace SeewoOpt.Services
         }
 
         /// <summary>
+        /// 设置读写的进程内串行锁。
+        ///
+        /// 【为什么需要】守护天数的刷新发生在同步线程，用户改设置发生在 UI 线程，
+        /// 两边都是 "Load → 改几个字段 → Save"。没有锁时，后写者会用自己
+        /// 读到的旧快照覆盖前者的改动：用户刚调的音量被守护天数那次保存
+        /// 悄悄还原，正是这版想消灭的“设置无声变回默认值”。
+        ///
+        /// 【为什么锁要包住整个读改写】只锁 Save 挡不住竞态：两个线程可以
+        /// 先后读到同一份旧值，再一前一后写回。必须把 Load 和 Save 放在
+        /// 同一个临界区里，见 <see cref="Update"/>。
+        /// </summary>
+        private static readonly object SyncRoot = new object();
+
+        /// <summary>
+        /// 原子地执行一次“读 → 改 → 写”。
+        ///
+        /// 所有需要修改设置的调用方都应该走这里，而不是自己 Load 完再 Save。
+        /// </summary>
+        public static void Update(Action<AppSettings> mutate)
+        {
+            if (mutate == null) throw new ArgumentNullException("mutate");
+
+            lock (SyncRoot)
+            {
+                AppSettings settings = Load();
+                mutate(settings);
+                Save(settings);
+            }
+        }
+
+        /// <summary>
         /// 从注册表读取设置。
         ///
         /// 修正记录：原实现在 catch 中静默套用默认值且不记日志，
@@ -182,78 +213,89 @@ namespace SeewoOpt.Services
         /// </summary>
         public static AppSettings Load()
         {
-            AppSettings settings = AppSettings.CreateDefault();
-
-            try
+            lock (SyncRoot)
             {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(REGISTRY_PATH))
+                AppSettings settings = AppSettings.CreateDefault();
+
+                try
                 {
-                    if (key == null)
+                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(REGISTRY_PATH))
                     {
-                        LogService.Write("注册表中无设置项，使用默认设置");
-                        return settings;
+                        if (key == null)
+                        {
+                            LogService.Write("注册表中无设置项，使用默认设置");
+                            return settings;
+                        }
+
+                        settings.AutoStart = ReadBool(key, "AutoStart", settings.AutoStart);
+                        settings.SilentStart = ReadBool(key, "SilentStart", settings.SilentStart);
+                        settings.AutoVolume = ReadBool(key, "AutoVolume", settings.AutoVolume);
+                        settings.VolumeLevel = ReadInt(key, "VolumeLevel", settings.VolumeLevel);
+                        settings.KillWps = ReadBool(key, "KillWps", settings.KillWps);
+                        settings.AutoStartTask = ReadBool(key, "AutoStartTask", settings.AutoStartTask);
+                        settings.FirstRunDate = ReadDate(key, "FirstRunDate", settings.FirstRunDate);
+                        settings.LastKnownGuardedDays =
+                            ReadInt(key, "LastKnownGuardedDays", settings.LastKnownGuardedDays);
+                        settings.ShutdownRules = ReadShutdownRules(key);
                     }
-
-                    settings.AutoStart = ReadBool(key, "AutoStart", settings.AutoStart);
-                    settings.SilentStart = ReadBool(key, "SilentStart", settings.SilentStart);
-                    settings.AutoVolume = ReadBool(key, "AutoVolume", settings.AutoVolume);
-                    settings.VolumeLevel = ReadInt(key, "VolumeLevel", settings.VolumeLevel);
-                    settings.KillWps = ReadBool(key, "KillWps", settings.KillWps);
-                    settings.AutoStartTask = ReadBool(key, "AutoStartTask", settings.AutoStartTask);
-                    settings.FirstRunDate = ReadDate(key, "FirstRunDate", settings.FirstRunDate);
-                    settings.LastKnownGuardedDays =
-                        ReadInt(key, "LastKnownGuardedDays", settings.LastKnownGuardedDays);
-                    settings.ShutdownRules = ReadShutdownRules(key);
                 }
-            }
-            catch (Exception ex)
-            {
-                LogService.Write($"读取设置失败，改用默认设置: {ex.Message}");
-            }
+                catch (Exception ex)
+                {
+                    LogService.Write($"读取设置失败，改用默认设置: {ex.Message}");
+                }
 
-            settings.Normalize();
-            return settings;
+                settings.Normalize();
+                return settings;
+            }
         }
 
-        /// <summary>将设置写回注册表</summary>
+        /// <summary>
+        /// 将设置写回注册表。
+        ///
+        /// 单个 Save 调用是线程安全的，但它**不能**保证“读改写”原子：
+        /// 需要保留未修改字段时，请用 <see cref="Update"/>。
+        /// </summary>
         public static void Save(AppSettings settings)
         {
             if (settings == null) throw new ArgumentNullException("settings");
 
-            settings.Normalize();
-
-            try
+            lock (SyncRoot)
             {
-                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(REGISTRY_PATH))
+                settings.Normalize();
+
+                try
                 {
-                    key.SetValue("AutoStart", settings.AutoStart);
-                    key.SetValue("SilentStart", settings.SilentStart);
-                    key.SetValue("AutoVolume", settings.AutoVolume);
-                    key.SetValue("VolumeLevel", settings.VolumeLevel);
-                    key.SetValue("KillWps", settings.KillWps);
-                    key.SetValue("AutoStartTask", settings.AutoStartTask);
+                    using (RegistryKey key = Registry.CurrentUser.CreateSubKey(REGISTRY_PATH))
+                    {
+                        key.SetValue("AutoStart", settings.AutoStart);
+                        key.SetValue("SilentStart", settings.SilentStart);
+                        key.SetValue("AutoVolume", settings.AutoVolume);
+                        key.SetValue("VolumeLevel", settings.VolumeLevel);
+                        key.SetValue("KillWps", settings.KillWps);
+                        key.SetValue("AutoStartTask", settings.AutoStartTask);
 
-                    // 首次运行日期只在"尚未记录"时写入一次。
-                    // 若每次都覆盖，卸载重装之外的任何情况都会被重置成今天，
-                    // "已守护 x 天"会永远显示 1 天——而它恰恰是每天都要看的数字。
-                    if (settings.FirstRunDate != DateTime.MinValue)
-                        key.SetValue("FirstRunDate", FormatDate(settings.FirstRunDate));
+                        // 首次运行日期只在"尚未记录"时写入一次。
+                        // 若每次都覆盖，卸载重装之外的任何情况都会被重置成今天，
+                        // "已守护 x 天"会永远显示 1 天——而它恰恰是每天都要看的数字。
+                        if (settings.FirstRunDate != DateTime.MinValue)
+                            key.SetValue("FirstRunDate", FormatDate(settings.FirstRunDate));
 
-                    // 已确认的守护天数：负数表示"尚无记录"，不写盘
-                    // （留给界面显示占位文案，而不是显示一个编造的 0）。
-                    if (settings.LastKnownGuardedDays >= 0)
-                        key.SetValue("LastKnownGuardedDays", settings.LastKnownGuardedDays);
+                        // 已确认的守护天数：负数表示"尚无记录"，不写盘
+                        // （留给界面显示占位文案，而不是显示一个编造的 0）。
+                        if (settings.LastKnownGuardedDays >= 0)
+                            key.SetValue("LastKnownGuardedDays", settings.LastKnownGuardedDays);
 
-                    // 关机规则存成一个 REG_SZ，各条之间用 ';' 分隔，每条是一个整数编码。
-                    // 用单值而非五个独立键：规则数量是可变的，用定长键名会留下
-                    // "删掉第 3 条后第 4、5 条要不要前移"这类歧义。
-                    key.SetValue("ShutdownRules", SerializeRules(settings.ShutdownRules));
+                        // 关机规则存成一个 REG_SZ，各条之间用 ';' 分隔，每条是一个整数编码。
+                        // 用单值而非五个独立键：规则数量是可变的，用定长键名会留下
+                        // "删掉第 3 条后第 4、5 条要不要前移"这类歧义。
+                        key.SetValue("ShutdownRules", SerializeRules(settings.ShutdownRules));
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                LogService.Write($"保存设置失败: {ex.Message}");
-                throw;
+                catch (Exception ex)
+                {
+                    LogService.Write($"保存设置失败: {ex.Message}");
+                    throw;
+                }
             }
         }
 

@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -269,33 +270,55 @@ namespace SeewoOpt.Services
         /// <summary>
         /// UDP 的一次请求-应答，带超时控制。
         ///
-        /// 总超时预算 timeoutMs 在多次发包之间分摊，而不是每包各给 timeoutMs，
-        /// 否则单次 Query 的最坏耗时会变成 SendAttemptsPerQuery × timeoutMs。
+        /// 【总预算是真的总预算】旧实现把 timeoutMs 同时给 connect 和每个
+        /// send/receive 步骤，最坏耗时是 5s(connect) + 2×(2.5s send + 2.5s recv)
+        /// = 15s，和注释里“共用同一总预算”并不相符。现在用 Stopwatch 记一个
+        /// 绝对截止时间，connect、两次发包、两次收包都从剩余时间里取；
+        /// 预算耗尽立即返回，交给上层换下一个服务器。
         /// </summary>
         private static int Exchange(Socket socket, EndPoint endPoint, byte[] buffer, int timeoutMs)
         {
-            // UDP 无连接，"Connect" 只是绑定默认对端并设置超时
+            Stopwatch clock = Stopwatch.StartNew();
+
+            // UDP 的 Connect 只是在本地记录对端，正常是毫秒级；
+            // 给它一半预算，保证即使它卡住，收包仍至少有一半时间可用。
             IAsyncResult connectResult = socket.BeginConnect(endPoint, null, null);
-            if (!connectResult.AsyncWaitHandle.WaitOne(timeoutMs, false))
+            int connectBudget = Math.Max(1, timeoutMs / 2);
+            if (!connectResult.AsyncWaitHandle.WaitOne(connectBudget, false))
                 throw new TimeoutException("连接 NTP 服务器超时");
             socket.EndConnect(connectResult);
 
-            int perAttemptMs = Math.Max(1000, timeoutMs / SendAttemptsPerQuery);
             int received = 0;
             Exception lastError = null;
 
             for (int attempt = 1; attempt <= SendAttemptsPerQuery; attempt++)
             {
+                int remaining = RemainingMs(clock, timeoutMs);
+                if (remaining <= 0) break;
+
+                // 把剩余预算平均分给还没用的尝试：第 1 包最多用一半，
+                // 第 2 包还有另一半。这样首包丢失时第 2 包真的有机会发出去，
+                // 而不是第 1 包把总预算吃光。
+                int attemptsLeft = SendAttemptsPerQuery - attempt + 1;
+                int attemptBudget = Math.Max(1, remaining / attemptsLeft);
+
                 try
                 {
+                    int beforeSend = RemainingMs(clock, timeoutMs);
+                    int sendBudget = Math.Min(attemptBudget, 1000);
                     IAsyncResult sendResult = socket.BeginSend(buffer, 0, buffer.Length, SocketFlags.None, null, null);
-                    if (sendResult.AsyncWaitHandle.WaitOne(perAttemptMs, false))
+                    if (sendResult.AsyncWaitHandle.WaitOne(sendBudget, false))
                         socket.EndSend(sendResult);
+                    int sendUsed = Math.Max(0, beforeSend - RemainingMs(clock, timeoutMs));
+
+                    int receiveBudget = Math.Min(
+                        RemainingMs(clock, timeoutMs),
+                        Math.Max(1, attemptBudget - sendUsed));
 
                     // Receive 必须重新发起：上一轮的 BeginReceive 在超时后已失效，
                     // 复用同一个 IAsyncResult 会直接抛 InvalidOperationException。
                     IAsyncResult receiveResult = socket.BeginReceive(buffer, 0, buffer.Length, SocketFlags.None, null, null);
-                    if (receiveResult.AsyncWaitHandle.WaitOne(perAttemptMs, false))
+                    if (receiveResult.AsyncWaitHandle.WaitOne(receiveBudget, false))
                     {
                         received = socket.EndReceive(receiveResult);
                         if (received > 0)
@@ -318,6 +341,13 @@ namespace SeewoOpt.Services
                 throw new TimeoutException("接收 NTP 响应超时（已重发 " + SendAttemptsPerQuery + " 次）: " + lastError.Message);
 
             throw new TimeoutException("接收 NTP 响应超时（已发送 " + SendAttemptsPerQuery + " 包）");
+        }
+
+        /// <summary>总预算还剩多少毫秒；已经耗尽返回 0。</summary>
+        private static int RemainingMs(Stopwatch clock, int totalMs)
+        {
+            long left = totalMs - clock.ElapsedMilliseconds;
+            return left <= 0 ? 0 : (int)left;
         }
     }
 

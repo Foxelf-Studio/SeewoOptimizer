@@ -269,28 +269,48 @@ namespace SeewoOpt
         }
 
         /// <summary>
-        /// 检查是否有待应用的更新（更新后重启）- 静默处理，不弹窗
+        /// 检查是否有待应用的更新（更新后重启）。
+        ///
+        /// pending.txt 有两种合法内容：
+        ///   · 新 exe 的完整路径  → 更新脚本已完成替换，清掉标记即可；
+        ///   · "UPDATE_FAILED"    → 脚本在复制/替换阶段失败并已回滚，
+        ///                          记一条明确的失败日志后清掉标记。
+        ///
+        /// 【旧实现的缺陷】它只判断“内容是不是一个存在的文件”。
+        /// 失败标记不是路径，File.Exists("UPDATE_FAILED") 永远为 false，
+        /// 于是标记永远清不掉，每次启动都误报“检测到待应用的更新”，
+        /// 真正的失败原因反而被这句噪音盖住。
         /// </summary>
         private static void HandlePendingUpdate()
         {
             try
             {
                 string pendingFile = Path.Combine(UPDATE_DIR, "pending.txt");
-                if (File.Exists(pendingFile))
+                if (!File.Exists(pendingFile)) return;
+
+                string content = File.ReadAllText(pendingFile).Trim();
+
+                if (string.Equals(content, "UPDATE_FAILED", StringComparison.OrdinalIgnoreCase))
                 {
-                    WriteLog("检测到待应用的更新");
-
-                    string newVersionPath = File.ReadAllText(pendingFile).Trim();
-                    string currentExe = Application.ExecutablePath;
-
-                    if (File.Exists(newVersionPath))
-                    {
-                        // 注意：这里不替换文件，因为已经在更新脚本中完成了
-                        // 只清理标志文件
-                        File.Delete(pendingFile);
-                        WriteLog("更新标志已清除");
-                    }
+                    WriteLog("上次自动更新在替换阶段失败（UPDATE_FAILED），"
+                           + "程序保持原版本运行；已清除失败标记");
+                    TryDelete(pendingFile);
+                    return;
                 }
+
+                if (File.Exists(content))
+                {
+                    // 注意：这里不替换文件，因为已经在更新脚本中完成了
+                    // 只清理标志文件
+                    File.Delete(pendingFile);
+                    WriteLog("更新标志已清除");
+                    return;
+                }
+
+                // 路径已失效（缓存被清理、手工删除了下载文件等）：
+                // 标记没有意义，清掉并留下一条可查的记录。
+                WriteLog($"待更新标记内容不是有效路径，已清除：{content}");
+                TryDelete(pendingFile);
             }
             catch (Exception ex)
             {
@@ -539,6 +559,42 @@ namespace SeewoOpt
 
        
         /// <summary>
+        /// 带显式超时的文件下载。
+        ///
+        /// 【为什么不能只给 exe 加超时】WebClient 没有 Timeout 属性，
+        /// 底层 HttpWebRequest 默认约 100 秒。exe 那条链路自己包了 60 秒，
+        /// 但 384 字节的 .sig 走的是裸 DownloadFileTaskAsync——
+        /// 遇到断网、认证门户或代理卡住时，会白等约 100 秒，
+        /// 期间 _updateCheckRunning 一直被占，后续重试直接跳过。
+        ///
+        /// 这里用 CTS + CancelAsync 给每次下载一个明确预算，
+        /// 超时就把被取消的任务观察掉，避免 UnobservedTaskException。
+        /// </summary>
+        private static async Task DownloadFileWithTimeoutAsync(
+            WebClient client, string url, string path, int timeoutSeconds, string what)
+        {
+            using (var cts = new CancellationTokenSource())
+            {
+                cts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+
+                Task downloadTask = client.DownloadFileTaskAsync(new Uri(url), path);
+                Task completed = await Task.WhenAny(downloadTask, Task.Delay(-1, cts.Token));
+
+                if (completed != downloadTask)
+                {
+                    client.CancelAsync();
+                    // 观察被取消的任务，别让它的异常留到终结器线程。
+                    _ = downloadTask.ContinueWith(t => t.Exception,
+                        TaskContinuationOptions.OnlyOnFaulted);
+
+                    throw new TimeoutException(what + "下载超时（" + timeoutSeconds + " 秒）");
+                }
+
+                await downloadTask;
+            }
+        }
+
+        /// <summary>
         /// 异步下载更新文件并验证签名（内部不捕获异常，由重试方法处理）
         /// </summary>
         private static async Task DownloadUpdateAsync(string downloadUrl, string fileName, Version newVersion, string expectedHash = null)
@@ -552,33 +608,18 @@ namespace SeewoOpt
 
             using (WebClient client = new WebClient())
             {
-                // 使用 CancellationTokenSource 实现超时
-                using (var cts = new CancellationTokenSource())
+                client.DownloadProgressChanged += (s, e) =>
                 {
-                    cts.CancelAfter(TimeSpan.FromSeconds(60)); // 60秒超时
-
-                    client.DownloadProgressChanged += (s, e) =>
+                    try
                     {
-                        try
-                        {
-                            if (e.ProgressPercentage % 10 == 0)
-                                WriteLog($"下载进度: {e.ProgressPercentage}%");
-                        }
-                        catch { }
-                    };
-
-                    var downloadTask = client.DownloadFileTaskAsync(new Uri(downloadUrl), downloadedFile);
-                    var completedTask = await Task.WhenAny(downloadTask, Task.Delay(-1, cts.Token));
-
-                    if (completedTask != downloadTask)
-                    {
-                        // 超时
-                        client.CancelAsync();
-                        throw new TimeoutException("下载超时（60秒）");
+                        if (e.ProgressPercentage % 10 == 0)
+                            WriteLog($"下载进度: {e.ProgressPercentage}%");
                     }
+                    catch { }
+                };
 
-                    await downloadTask; // 重新抛出可能的异常
-                }
+                await DownloadFileWithTimeoutAsync(
+                    client, downloadUrl, downloadedFile, 60, "更新文件");
             }
 
             WriteLog("更新文件下载完成，下载配套签名...");
@@ -589,13 +630,17 @@ namespace SeewoOpt
             {
                 using (WebClient client = new WebClient())
                 {
-                    await client.DownloadFileTaskAsync(new Uri(signatureUrl), signatureFile);
+                    // 给 .sig 一个比 exe 更短的预算：它只有几百字节，
+                    // 100 秒的默认等待没有任何意义，只会拖住更新检查。
+                    await DownloadFileWithTimeoutAsync(
+                        client, signatureUrl, signatureFile, 30, "签名文件");
                 }
                 WriteLog("签名文件下载完成");
             }
             catch (Exception ex)
             {
                 TryDelete(downloadedFile);
+                TryDelete(signatureFile);
                 throw new Exception(
                     "未找到更新文件的签名（应为 " + fileName + SignatureVerifier.SIGNATURE_EXTENSION +
                     "）。\n请到发布页下载完整更新包。\n原因: " + ex.Message);

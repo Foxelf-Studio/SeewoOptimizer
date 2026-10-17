@@ -50,5 +50,12 @@
       它只依赖 System + LogService（已在上方编入），无 UI 依赖。
     -->
     <Compile Include="..\WindowsFormsApp1\Services\ShutdownService.cs" />
+    <!--
+      签名验证也链接真实源码。换钥过渡的逻辑（“当前 + 下一把”都受信）
+      必须能被测试直接验证：测试自己生成两对 RSA 密钥，用第二把签名，
+      再分别用“只有第一把”和“两把都有”去验。这把产品内置的真钥
+      完全不需要出现在测试里。
+    -->
+    <Compile Include="..\WindowsFormsApp1\Services\SignatureVerifier.cs" />
   </ItemGroup>
 </Project>

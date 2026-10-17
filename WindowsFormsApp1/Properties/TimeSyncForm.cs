@@ -789,11 +789,28 @@ namespace SeewoOpt
             try
             {
                 DateTime now = DateTime.Now;
-                AppSettings settings = SettingsStore.Load();
+                DateTime previousFirstRun = DateTime.MinValue;
+                DateTime trusted = DateTime.MinValue;
+                GuardDayPolicy.FirstRunDateVerdict verdict = GuardDayPolicy.FirstRunDateVerdict.Missing;
 
-                GuardDayPolicy.FirstRunDateVerdict verdict;
-                DateTime trusted = GuardDayPolicy.ResolveTrustedFirstRunDate(
-                    settings.FirstRunDate, now, out verdict);
+                // 【为什么整段放进 Update】守护天数与用户设置共用同一个注册表项。
+                // 同步线程在这里 Load→改→Save，而 UI 线程可能正在保存音量/开关；
+                // 各写各的会让后写者用旧快照覆盖前者。Update 把读改写锁在同一临界区。
+                SettingsStore.Update(s =>
+                {
+                    previousFirstRun = s.FirstRunDate;
+
+                    GuardDayPolicy.FirstRunDateVerdict localVerdict;
+                    DateTime localTrusted = GuardDayPolicy.ResolveTrustedFirstRunDate(
+                        s.FirstRunDate, now, out localVerdict);
+
+                    verdict = localVerdict;
+                    trusted = localTrusted;
+
+                    s.FirstRunDate = localTrusted;
+                    days = s.GuardedDays(now);
+                    s.LastKnownGuardedDays = days;
+                });
 
                 // 把判定结果如实写进日志：将来"天数不对"时，
                 // 这里是唯一能看出"起点被重置过、为什么被重置"的地方。
@@ -804,26 +821,19 @@ namespace SeewoOpt
                         break;
 
                     case GuardDayPolicy.FirstRunDateVerdict.InFuture:
-                        WriteLog($"守护起始日期 {settings.FirstRunDate:yyyy-MM-dd} 晚于今天"
+                        WriteLog($"守护起始日期 {previousFirstRun:yyyy-MM-dd} 晚于今天"
                                + $"（{now:yyyy-MM-dd}），只可能是在时钟不准时记下的，"
                                + $"已重置为 {trusted:yyyy-MM-dd}");
                         break;
 
                     case GuardDayPolicy.FirstRunDateVerdict.BeforeFeatureEpoch:
-                        WriteLog($"守护起始日期 {settings.FirstRunDate:yyyy-MM-dd} 早于本功能上线日"
+                        WriteLog($"守护起始日期 {previousFirstRun:yyyy-MM-dd} 早于本功能上线日"
                                + $"（{GuardDayPolicy.FeatureEpoch:yyyy-MM-dd}），不可能成立，"
                                + $"已重置为 {trusted:yyyy-MM-dd}");
                         break;
                 }
 
-                settings.FirstRunDate = trusted;
-                days = settings.GuardedDays(now);
-                settings.LastKnownGuardedDays = days;
-
-                // 只改这两个字段，其余按读回的原样回写
-                SettingsStore.Save(settings);
                 _firstRunDate = trusted;
-
                 SetGuardLabel(days);
                 WriteLog($"守护天数已刷新：第 {days} 天");
             }
@@ -2051,23 +2061,24 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
         {
             try
             {
-                // 【必须先读回再改】FirstRunDate 是启动时写入、之后只读的字段。
-                // 若这里用 new AppSettings 重新构造，FirstRunDate 会是 MinValue，
-                // 而 Save 里那条"仅在未记录时写入"的保护会让注册表里的
-                // 旧值再也写不回去——本次运行之后的守护天数就全错了。
-                AppSettings settings = SettingsStore.Load();
-
-                settings.AutoStart = _autoStart;
-                settings.SilentStart = _silentStart;
-                settings.AutoVolume = _autoVolume;
-                settings.VolumeLevel = _volumeLevel;
-                settings.KillWps = _killWps;
-                settings.AutoStartTask = _autoStartTask;
-                settings.ShutdownRules = _shutdownRules;
-                if (settings.FirstRunDate == DateTime.MinValue)
-                    settings.FirstRunDate = _firstRunDate;
-
-                SettingsStore.Save(settings);
+                // 【必须通过 Update 读改写】FirstRunDate 是启动时写入、之后只读的字段。
+                // 若用 new AppSettings 重新构造，FirstRunDate 会是 MinValue，
+                // 而 Save 里那条"仅在未记录时写入"的保护会让注册表里的旧值
+                // 再也写不回去——本次运行之后的守护天数就全错了。
+                // Update 内部先 Load 再改再 Save，并持同一把锁，
+                // 不会与同步线程的守护天数保存互相覆盖。
+                SettingsStore.Update(s =>
+                {
+                    s.AutoStart = _autoStart;
+                    s.SilentStart = _silentStart;
+                    s.AutoVolume = _autoVolume;
+                    s.VolumeLevel = _volumeLevel;
+                    s.KillWps = _killWps;
+                    s.AutoStartTask = _autoStartTask;
+                    s.ShutdownRules = _shutdownRules;
+                    if (s.FirstRunDate == DateTime.MinValue)
+                        s.FirstRunDate = _firstRunDate;
+                });
 
                 UpdateAutoStartTask();
 
@@ -2079,6 +2090,32 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
             {
                 MessageBox.Show($"保存设置失败：{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        /// <summary>
+        /// 停止关机巡检并清空内存中的规则。
+        ///
+        /// 【为什么卸载时必须调用】卸载只删数据目录、注册表和计划任务，
+        /// 不会自己停掉窗体上的定时器。用户选择“不立即退出”后，
+        /// 程序仍在托盘里，到点照样关机——已经卸载了还会关机，无法解释。
+        ///
+        /// 【为什么只清内存、不写状态文件】数据目录马上要被删掉，
+        /// 这时 SaveShutdownState 会把刚删掉的目录重新建出来。
+        /// 内存清空 + 定时器停止已经足够；下次启动读不到状态文件，
+        /// 自然不会恢复任何承诺。
+        /// </summary>
+        private void StopShutdownWatcher()
+        {
+            if (shutdownTimer != null)
+            {
+                shutdownTimer.Stop();
+                shutdownTimer.Dispose();
+                shutdownTimer = null;
+            }
+
+            ShutdownService.ResetRuntimeState();
+            _shutdownRules = new List<ShutdownTimeRule>();
+            WriteLog("已停止关机巡检并清空关机规则（卸载）");
         }
 
         /// <summary>
@@ -2176,6 +2213,11 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
 
             if (confirm != DialogResult.Yes)
                 return;
+
+            // 【卸载的第一件事：停掉关机守候】
+            // 否则用户选“不立即退出”后，程序仍在托盘里按旧规则关机。
+            // 放在删数据之前，避免定时器在删除过程中触发。
+            StopShutdownWatcher();
 
             // 开始卸载，并在主窗口显示日志（确保在 UI 线程）
             AddLog("\n========== 开始卸载程序 ==========\n", Color.DarkRed);

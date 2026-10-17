@@ -57,6 +57,26 @@ CI 在推送 `v*` 标签时会：
 
 因此“标签写 26.10.17、程序集还是 26.10.11”这种错误会在 CI 就暴露，不会等到用户更新时才发现。
 
+## 轮换签名密钥
+
+客户端只信任编译进 exe 的公钥（`Services/SignatureVerifier.cs` 的
+`TrustedPublicKeysBase64` 数组）。换钥必须按下面顺序，不能跳步：
+
+1. 生成新密钥对（RSA-3072）：
+   ```bash
+   openssl genrsa -out private_key_next.pem 3072
+   openssl rsa -in private_key_next.pem -pubout -outform DER | base64 -w 0
+   ```
+2. 把新公钥的 Base64 **追加**到 `TrustedPublicKeysBase64`，旧钥保留。
+3. **用旧私钥**签名并发布这一版。用户升级后，客户端同时信任旧钥和新钥。
+4. 确认目标机器都已升级（看日志里的版本号/ BuildId），再改用**新私钥**签名。
+   此时旧客户端只认旧钥会拒绝新包——所以第 3 步必须先完成。
+5. 过渡期结束后，从数组里移除旧钥。移除旧钥的这一版必须用新钥签名，
+   且要确认没有停留在旧版本的机器，否则它们再也收不到更新。
+
+`tools/publish.cmd` 默认用 `signing\public_key.pem` 自检；换钥签名时，
+把 `PUBKEY` 指向与本次私钥配套的公钥，或把新公钥覆盖到该路径。
+
 ## 一次性清理：v26.11.0 / v26.12.0
 
 这两个标签是自更新测试用的，已确认弃用；`v26.10.11` 需要移到实际发布产物对应的提交。
