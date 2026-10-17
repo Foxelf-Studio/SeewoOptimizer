@@ -157,7 +157,7 @@ def main():
     if not args.no_push:
         remote = "https://oauth2:%s@gitee.com/%s.git" % (token, args.repo)
         for ref in ("refs/heads/master", "refs/tags/%s" % args.tag):
-            cmd = ["git", "push", remote, ref]
+            cmd = ["git", "-c", "credential.helper=", "push", remote, ref]
             print("\n[git] push %s" % ref)
             if args.dry_run:
                 print("  (dry-run) 跳过")
