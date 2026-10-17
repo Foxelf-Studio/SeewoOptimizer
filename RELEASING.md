@@ -63,9 +63,20 @@ CI 在推送 `v*` 标签时会：
 `objects.githubusercontent.com` 在 IP 层被拦。客户端因此同时查询两个源，
 **版本高的优先，版本相同时优先用 Gitee 下载**。
 
-Gitee 那一路要能生效，每次发版都必须同步一次：
+Gitee 那一路要能生效，每次发版都必须同步一次。推荐用脚本（会依次推 master、
+推标签、建发行版、按 exe→sig 顺序传附件、最后复核附件是否齐全）：
 
-1. 在 Gitee 建一个**公开**仓库，路径与 `Program.cs` 里的 `GITEE_API` 常量一致
+```bat
+set GITEE_TOKEN=<你的私人令牌>
+python tools\publish_gitee.py --tag v26.10.17 ^
+    --notes ..\v26.10.17_更新日志.md ^
+    --exe ..\dist\SeewoOpt.exe --sig ..\dist\SeewoOpt.exe.sig
+```
+
+令牌只需要 `projects` 权限。先加 `--dry-run` 可以只看它会做什么。
+手工在网页上做也可以，但要守住下面几条：
+
+1. 确认 Gitee 上有一个**公开**仓库，路径与 `Program.cs` 里的 `GITEE_API` 常量一致
    （当前是 `Foxelf-Studio/SeewoOptimizer`）。路径不同就改常量，两边必须对上。
    Gitee 发布发行版要求账号已实名认证。
 2. 把同一个标签推上去（只推标签也够，客户端只读发行版）：
