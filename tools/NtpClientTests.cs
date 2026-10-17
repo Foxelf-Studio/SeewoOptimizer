@@ -77,6 +77,7 @@ internal static class NtpClientTests
         TestShutdownCatchUpBeyondGrace();
         TestShutdownStateRoundTrip();
         TestShutdownStateKeepsSkip();
+        TestShutdownStateKeepsDelayedSkip();
         TestShutdownStateExpiresStalePromise();
         TestShutdownStateRejectsGarbage();
         // 【顺序约束】TestSkipAbortDecision 会永久置位进程内的 _shutdownIssued，
@@ -1785,6 +1786,49 @@ internal static class NtpClientTests
         Check("重启后仍记得「本次不关机」",
             !r.ShouldShutdown,
             r.ShouldShutdown ? "用户说过不关，重启后还是关了" : "");
+
+        ShutdownService.ResetRuntimeState();
+    }
+
+    /// <summary>
+    /// 顺延承诺上的“本次不关机”也必须跨重启保留。
+    ///
+    /// 这是最容易漏的一条：规则 23:00、22:56 重启补弹、承诺 23:01。
+    /// 用户跳过的是 23:01，而提醒窗口算的是 23:00。进程内靠 _warnedForDue
+    /// 挡住重复询问；重启后它不落盘，只有 skip 被恢复，必须另有一道
+    /// `_skipUntil != _promisedAt` 才能不重复问。
+    /// </summary>
+    private static void TestShutdownStateKeepsDelayedSkip()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 0, DayOfWeek.Monday)
+        };
+
+        ShutdownService.ResetRuntimeState();
+
+        var warn = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 22, 56, 0));
+        Check("22:56 重启补弹（前提）", warn.ShouldWarn,
+            warn.ShouldWarn ? "" : "没弹提醒，后续断言无意义");
+        Check("顺延承诺为 23:01（前提）",
+            warn.DueAt == new DateTime(2026, 10, 12, 23, 1, 0),
+            $"得到 {warn.DueAt:HH:mm}");
+
+        ShutdownService.SkipOnce(warn.DueAt);
+        string text = ShutdownService.ExportStateText();
+
+        ShutdownService.ResetRuntimeState();
+        ShutdownService.ImportStateText(text, new DateTime(2026, 10, 12, 22, 57, 0));
+
+        var afterRestart = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 22, 57, 0));
+        Check("重启后不得再次询问已跳过的顺延承诺",
+            !afterRestart.ShouldWarn,
+            afterRestart.ShouldWarn ? "用户刚说过不关，重启后又弹一次" : "");
+
+        var atDue = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 1, 0));
+        Check("重启后仍不得执行已跳过的顺延承诺",
+            !atDue.ShouldShutdown,
+            atDue.ShouldShutdown ? "跳过标记没跨过重启" : "");
 
         ShutdownService.ResetRuntimeState();
     }

@@ -232,7 +232,7 @@ namespace SeewoOpt.Services
                 DateTime? next = ShutdownScheduleLogic.NextOccurrence(
                     warnRule, thisMinute.AddMinutes(-1));
 
-                // 【两道条件各司其职，不要合并】
+                // 【三道条件各司其职，不要合并】
                 //   _warnedForDue != next.Value  —— 这一轮关机已提醒过（窗口内去重的**主防线**）
                 //   _skipUntil    != next.Value  —— 用户已选"本次不关机"，别再问
                 //
@@ -242,8 +242,25 @@ namespace SeewoOpt.Services
                 // 于是它在最需要它挡的重启场景里恰好失效——真正挡住重复弹窗的
                 // 始终是 _warnedForDue。留着它只会让人误以为它在起作用，
                 // 而删掉它测试纹丝不动，正是"冗余防线掩盖真防线"的典型。
+                // 【第三道 _skipUntil != _promisedAt 与上面那道不是重复】
+                // 上面的比较对象是“规则时刻”（next）；而用户在顺延路径上
+                // 跳过的是“承诺时刻”（22:56 弹 → 承诺 23:01），两者不相等。
+                // 进程内还有 _warnedForDue 兜住，所以平时看不出差别；
+                // 但重启后 _warnedForDue 不落盘，只有 skip 被恢复——
+                // 没有这一道，用户刚说过的“本次不关机”会再被问一遍。
+                //
+                // 必须排除两种“不能采信 skip”的情况：
+                //   1. 尚未产生任何承诺：两者都是 MinValue，会被误判成已跳过；
+                //   2. 承诺已经过期（超过补执行宽限）：那是昨天那一轮的记账，
+                //      不能拿它挡住今天的提醒。
+                // 只要承诺还在有效窗口内、且 skip 指向它，就说明这一轮
+                // 用户已经明确拒绝，不再询问。
+                bool promiseStillRelevant = _promisedAt != DateTime.MinValue
+                    && _promisedAt >= now.AddMinutes(-CatchUpGraceMinutes);
+
                 if (next.HasValue && _warnedForDue != next.Value
-                    && _skipUntil != next.Value)
+                    && _skipUntil != next.Value
+                    && (!promiseStillRelevant || _skipUntil != _promisedAt))
                 {
                     // ===== 承诺时刻 = max(发现时刻所在分钟 + 提前量, 规则时刻) =====
                     //
