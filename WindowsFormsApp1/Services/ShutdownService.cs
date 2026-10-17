@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text;
 
 namespace SeewoOpt.Services
 {
@@ -53,6 +55,24 @@ namespace SeewoOpt.Services
         /// 更密没有意义（多消耗 CPU 却不提高精度），更疏则可能整分钟地错过。
         /// </summary>
         public const int PollIntervalMs = 20000;
+
+        /// <summary>
+        /// 关机点过后，允许补执行的宽限分钟数。
+        ///
+        /// 【为什么需要宽限，而不是只在"那一分钟"执行】
+        /// 20 秒巡检只能保证"进程醒着"时命中。以下情况会让程序错过承诺时刻：
+        ///   · 系统休眠/睡眠，唤醒时已经是几分钟后；
+        ///   · 机器在关机点前后重启，进程重新起来时那一分钟已过；
+        ///   · UI 线程被长时间阻塞（例如系统对话框、网络盘卡死）。
+        /// 旧实现只认 `当前分钟 == 承诺时刻`，一旦跨过就整天不再关机，
+        /// 而且没有任何提示——对一个"教室定点关机"工具来说这是功能失效。
+        ///
+        /// 【为什么是 10 分钟而不是一直补】
+        /// 宽限的意义是"把刚才那一次补上"，不是"今天什么时候开机都关"。
+        /// 取 10 分钟：足够覆盖休眠唤醒与重启，又不会让上午开机的机器
+        /// 去补执行前一晚的关机。超过宽限只写日志，不再执行。
+        /// </summary>
+        public const int CatchUpGraceMinutes = 10;
 
         /// <summary>
         /// 已经为"哪一次关机"弹过提醒了。防止同一轮关机重复弹窗。
@@ -162,7 +182,18 @@ namespace SeewoOpt.Services
             //
             // 这是本服务的主路径：提醒框弹出时就把"承诺时刻"定下来了
             // （由窗体调 PromiseShutdown 写入），此后每轮巡检只做一件事——
-            // 看当前分钟是否等于承诺时刻。相等就关机。
+            // 看当前时间是否已经到达承诺时刻。到达就关机。
+            //
+            // 【为什么不再要求"当前分钟恰好等于承诺时刻"】
+            // 旧实现写成 `_promisedAt == thisMinute`，等于把执行窗口压缩成
+            // 60 秒。休眠唤醒、重启、UI 线程卡顿只要跨过那一分钟，
+            // 当天就再也不会关机，且日志里什么都不会留下。
+            // 现在改为**区间判定**：承诺时刻起、宽限期内，任意一次巡检都补执行。
+            //
+            // 【为什么仍然不允许重复执行】
+            // _lastShutdownMinute 记录的是"哪一次承诺已执行"（由 MarkShutdown
+            // 写入承诺时刻，而不是执行时的当前分钟）。补执行发生在 23:04 时，
+            // 记下的仍是 23:00，因此后续巡检不会把同一次关机再发一遍。
             //
             // 【为什么不再从规则实时推导】
             // 因为重启后补弹提醒会顺延（22:56 补弹 → 承诺 23:01），
@@ -170,13 +201,14 @@ namespace SeewoOpt.Services
             // 23:01 又因承诺再关一次。用"承诺时刻"作唯一判据，
             // 23:00 那一刻 _promisedAt 指向的是 23:01，自然不命中，只关一次。
             if (_promisedAt != DateTime.MinValue
-                && _promisedAt == thisMinute
-                && _lastShutdownMinute != thisMinute
-                && _skipUntil != thisMinute)
+                && now >= _promisedAt
+                && now < _promisedAt.AddMinutes(CatchUpGraceMinutes)
+                && _lastShutdownMinute != _promisedAt
+                && _skipUntil != _promisedAt)
             {
                 result.ShouldShutdown = true;
-                result.Rule = FindRuleForMoment(rules, thisMinute);
-                result.DueAt = thisMinute;
+                result.Rule = FindRuleForMoment(rules, _promisedAt);
+                result.DueAt = _promisedAt;
                 return result;
             }
 
@@ -303,11 +335,18 @@ namespace SeewoOpt.Services
             if (_warnedForDue == DateTime.MinValue) _warnedForDue = thisMinute;
         }
 
-        /// <summary>记账：本分钟已执行关机</summary>
-        public static void MarkShutdown(DateTime now)
+        /// <summary>
+        /// 记账：哪一次承诺已经执行过。
+        ///
+        /// 参数必须是**承诺时刻**（PollResult.DueAt），不是执行时的当前时间。
+        /// 补执行可能发生在承诺时刻之后几分钟；若按当前分钟记账，
+        /// `_lastShutdownMinute != _promisedAt` 会一直成立，同一轮关机会
+        /// 每 20 秒重复下发一次。
+        /// </summary>
+        public static void MarkShutdown(DateTime dueAt)
         {
-            _lastShutdownMinute = new DateTime(now.Year, now.Month, now.Day,
-                                               now.Hour, now.Minute, 0, now.Kind);
+            _lastShutdownMinute = new DateTime(dueAt.Year, dueAt.Month, dueAt.Day,
+                                               dueAt.Hour, dueAt.Minute, 0, dueAt.Kind);
         }
 
         /// <summary>「本次不关机」实际做了什么，供调用方如实写日志。</summary>
@@ -611,6 +650,159 @@ namespace SeewoOpt.Services
             _lastShutdownMinute = DateTime.MinValue;
             _skipUntil = DateTime.MinValue;
             _promisedAt = DateTime.MinValue;
+        }
+
+        // ============================================================
+        // 状态持久化
+        //
+        // 【为什么需要落盘】
+        // 承诺时刻、跳过标记、已执行标记原先只在内存里。进程一退出
+        // （用户重启、崩溃、更新后重启），这些状态全部丢失：
+        //   · 重启发生在关机点之后 → 当天不会再关；
+        //   · 用户点过“本次不关机”后崩溃重启 → 会再问一次；
+        //   · 补执行时无法判断“这一次是不是已经关过了”。
+        // 落盘后，承诺与跳过都能跨重启保留，配合 CatchUpGraceMinutes
+        // 才能真正覆盖“休眠唤醒/重启/卡顿”这三类漏关场景。
+        //
+        // 【为什么不持久化 _warnedForDue】
+        // “重启后补弹提醒并把承诺顺延为现在+5分钟”是用户明确要的行为，
+        // 测试 TestShutdownPromiseAfterRestart 把它钉住了。若把“已提醒”
+        // 也持久化，重启后就不会补弹，等于悄悄推翻那条决定。
+        // 因此这里只保存“承诺/跳过/已执行”三笔账。
+        // ============================================================
+
+        private const string StateVersion = "v1";
+        private const string StateTimeFormat = "yyyy-MM-dd HH:mm:ss";
+
+        /// <summary>
+        /// 把当前记账导出为文本，供窗体落盘。
+        /// 只做纯序列化，不碰文件系统——测试工程链接本文件时不会写用户磁盘。
+        /// </summary>
+        public static string ExportStateText()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine(StateVersion);
+            sb.AppendLine("promised=" + FormatStateTime(_promisedAt));
+            sb.AppendLine("skip=" + FormatStateTime(_skipUntil));
+            sb.AppendLine("last=" + FormatStateTime(_lastShutdownMinute));
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 从窗体读到的文本恢复记账状态。
+        ///
+        /// 【过期处理】承诺时刻早于 now - 宽限 的，一律丢弃：
+        /// 那是上一次运行遗留的，补执行已经没有意义，留着反而会在
+        /// 下一次巡检时突然关机。跳过标记同理。
+        ///
+        /// 返回一段可读摘要，供调用方写日志；不抛异常。
+        /// </summary>
+        public static string ImportStateText(string text, DateTime now)
+        {
+            _promisedAt = DateTime.MinValue;
+            _skipUntil = DateTime.MinValue;
+            _lastShutdownMinute = DateTime.MinValue;
+            _warnedForDue = DateTime.MinValue;
+
+            DateTime promised, skip, last;
+            if (!TryParseStateText(text, out promised, out skip, out last))
+                return "状态文件格式不正确，已忽略";
+
+            List<string> notes = new List<string>();
+
+            if (promised != DateTime.MinValue)
+            {
+                if (promised >= now.AddMinutes(-CatchUpGraceMinutes))
+                {
+                    _promisedAt = promised;
+                    notes.Add(string.Format("恢复关机承诺 {0:yyyy-MM-dd HH:mm}", promised));
+                }
+                else
+                {
+                    notes.Add(string.Format(
+                        "上次关机承诺 {0:yyyy-MM-dd HH:mm} 已超过 {1} 分钟宽限，放弃补执行",
+                        promised, CatchUpGraceMinutes));
+                }
+            }
+
+            if (skip != DateTime.MinValue)
+            {
+                if (skip >= now.AddMinutes(-CatchUpGraceMinutes))
+                {
+                    _skipUntil = skip;
+                    notes.Add(string.Format("恢复“本次不关机”标记 {0:yyyy-MM-dd HH:mm}", skip));
+                }
+                else
+                {
+                    notes.Add("上次“本次不关机”标记已过期，忽略");
+                }
+            }
+
+            if (last != DateTime.MinValue)
+                _lastShutdownMinute = last;
+
+            if (notes.Count == 0) return "无有效记录";
+            return string.Join("；", notes.ToArray());
+        }
+
+        private static string FormatStateTime(DateTime value)
+        {
+            return value == DateTime.MinValue
+                ? string.Empty
+                : value.ToString(StateTimeFormat, CultureInfo.InvariantCulture);
+        }
+
+        private static bool TryParseStateText(
+            string text, out DateTime promised, out DateTime skip, out DateTime last)
+        {
+            promised = DateTime.MinValue;
+            skip = DateTime.MinValue;
+            last = DateTime.MinValue;
+
+            if (string.IsNullOrWhiteSpace(text)) return true;
+
+            string[] lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length == 0) return true;
+
+            if (!string.Equals(lines[0].Trim(), StateVersion, StringComparison.Ordinal))
+                return false;
+
+            bool sawPromised = false, sawSkip = false, sawLast = false;
+
+            for (int i = 1; i < lines.Length; i++)
+            {
+                string line = lines[i].Trim();
+                if (line.Length == 0) continue;
+
+                int eq = line.IndexOf('=');
+                if (eq <= 0) return false;
+
+                string key = line.Substring(0, eq).Trim();
+                string raw = line.Substring(eq + 1).Trim();
+
+                DateTime parsed;
+                if (!TryParseStateTime(raw, out parsed)) return false;
+
+                switch (key)
+                {
+                    case "promised": promised = parsed; sawPromised = true; break;
+                    case "skip": skip = parsed; sawSkip = true; break;
+                    case "last": last = parsed; sawLast = true; break;
+                    default: break;      // 未来新增字段：忽略，保持向前兼容
+                }
+            }
+
+            // 三个字段必须齐全；缺一个就当作损坏，宁可清空也不要猜。
+            return sawPromised && sawSkip && sawLast;
+        }
+
+        private static bool TryParseStateTime(string raw, out DateTime value)
+        {
+            value = DateTime.MinValue;
+            if (string.IsNullOrEmpty(raw)) return true;   // 空 = 未记录
+            return DateTime.TryParseExact(
+                raw, StateTimeFormat, CultureInfo.InvariantCulture,
+                DateTimeStyles.None, out value);
         }
 
         /// <summary>

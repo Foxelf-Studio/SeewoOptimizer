@@ -165,6 +165,16 @@ namespace SeewoOpt
         /// </summary>
         private System.Windows.Forms.Timer shutdownTimer;
 
+        /// <summary>
+        /// 关机记账的落盘文件名（位于 LogService.LogDirectory）。
+        ///
+        /// 【为什么要落盘】承诺时刻、跳过标记与“已执行”标记原先只在内存里，
+        /// 进程一退出就丢。休眠唤醒、重启、卡顿跨过关机点后，
+        /// 程序就无法判断“这一次到底关没关过”。详见 ShutdownService 的
+        /// 状态持久化注释。
+        /// </summary>
+        private const string SHUTDOWN_STATE_FILE = "shutdown-state.txt";
+
         // 程序版本号（从程序集读取，统一管理）
         private readonly string _versionString;
 
@@ -642,6 +652,11 @@ namespace SeewoOpt
                 // RefreshGuardDaysAfterTimeSync。
                 ShowStoredGuardDays();
 
+                // 【关机记账必须在巡检启动前恢复】
+                // 否则第一轮 Poll 看到的是空承诺，会按规则重新推导/重新提醒，
+                // 把上一次运行已经做出的承诺与“本次不关机”选择一起丢掉。
+                LoadShutdownState();
+
                 StartShutdownWatcher();
 
                 if (Program.PendingUpdateInfo != null && trayIcon != null)
@@ -868,6 +883,55 @@ namespace SeewoOpt
         }
 
         /// <summary>
+        /// 从数据目录恢复关机记账。
+        ///
+        /// 文件不存在、损坏、字段过期都由 ShutdownService.ImportStateText
+        /// 收敛成一条可读摘要，这里只负责读与写日志，不参与判定。
+        /// </summary>
+        private void LoadShutdownState()
+        {
+            try
+            {
+                string path = Path.Combine(LogService.LogDirectory, SHUTDOWN_STATE_FILE);
+                if (!File.Exists(path)) return;
+
+                string text = File.ReadAllText(path, System.Text.Encoding.UTF8);
+                string summary = ShutdownService.ImportStateText(text, DateTime.Now);
+                WriteLog("恢复关机状态：" + summary);
+            }
+            catch (Exception ex)
+            {
+                WriteLog("恢复关机状态失败（按无记录处理）：" + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 把当前关机记账写回数据目录。
+        ///
+        /// 调用点刻意选在“状态已改变”的瞬间（出提醒、跳过、执行、设置重排），
+        /// 而不是退出时——进程被强杀时退出路径根本不会执行。
+        /// 写失败只记日志，绝不影响关机主流程：盘满/权限问题不该让机器不关。
+        /// </summary>
+        private void SaveShutdownState()
+        {
+            try
+            {
+                string dir = LogService.LogDirectory;
+                if (!Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+
+                File.WriteAllText(
+                    Path.Combine(dir, SHUTDOWN_STATE_FILE),
+                    ShutdownService.ExportStateText(),
+                    new System.Text.UTF8Encoding(false));
+            }
+            catch (Exception ex)
+            {
+                WriteLog("保存关机状态失败（不影响本次关机）：" + ex.Message);
+            }
+        }
+
+        /// <summary>
         /// 一次关机巡检：提醒或执行。全程跑在 UI 线程（WinForms Timer 的特性）。
         /// </summary>
         private void PollShutdown()
@@ -883,11 +947,15 @@ namespace SeewoOpt
 
                 if (result.ShouldWarn)
                 {
-                    HandleShutdownWarning(result, now);
+                    // Poll 已在返回前写入承诺时刻与“已提醒”标记。
+                    // 先落盘再弹框：弹框是模态的，用户可能一直不点，
+                    // 这期间进程若被杀，承诺不能丢。
+                    SaveShutdownState();
+                    HandleShutdownWarning(result);
                 }
                 else if (result.ShouldShutdown)
                 {
-                    HandleShutdownExecution(result, now);
+                    HandleShutdownExecution(result);
                 }
             }
             catch (Exception ex)
@@ -910,7 +978,7 @@ namespace SeewoOpt
         /// UI 线程会一直阻塞在这里，不能依赖"弹框返回后再记账"）。
         /// 所以本方法不再需要 MarkWarned / PromiseShutdown。
         /// </summary>
-        private void HandleShutdownWarning(ShutdownService.PollResult result, DateTime now)
+        private void HandleShutdownWarning(ShutdownService.PollResult result)
         {
             WriteLog($"触发关机提醒：规则 {result.Rule.Describe()}，"
                    + $"预定于 {result.DueAt:HH:mm} 关机");
@@ -970,6 +1038,10 @@ namespace SeewoOpt
                 // 并如实返回它到底做了什么——日志据此措辞，不含糊。
                 ShutdownService.SkipOutcome outcome = ShutdownService.SkipOnce(result.DueAt);
 
+                // 立即落盘：用户的选择必须扛得住崩溃/重启，
+                // 否则重启后程序会把“已经说过不关”的那一次再问一遍。
+                SaveShutdownState();
+
                 // 区分两种"非确认"并分别记日志，便于日后排查用户到底做了什么。
                 // 行为上两者完全一致（都跳过），差别只在日志措辞。
                 string how = (choice == DialogResult.No)
@@ -1013,9 +1085,16 @@ namespace SeewoOpt
         /// result.Rule 在"重启补弹后顺延"的情形下可能为 null
         /// （承诺时刻已不等于任何规则时刻），文案需容忍。
         /// </summary>
-        private void HandleShutdownExecution(ShutdownService.PollResult result, DateTime now)
+        private void HandleShutdownExecution(ShutdownService.PollResult result)
         {
-            ShutdownService.MarkShutdown(now);
+            // 记的是“哪一次承诺已执行”，不是执行时的当前分钟：
+            // 补执行可能发生在承诺时刻之后几分钟，按当前分钟记会导致
+            // 同一轮关机每 20 秒重复下发一次。详见 MarkShutdown 注释。
+            ShutdownService.MarkShutdown(result.DueAt);
+
+            // 先落盘再下发命令：一旦命令发出，进程可能随系统关机一起消失，
+            // 没有机会再保存“这次已经关过”。落盘失败不影响关机（方法内部已吞异常）。
+            SaveShutdownState();
 
             string label = result.Rule != null
                 ? result.Rule.Describe()
@@ -2012,6 +2091,10 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
         private void RestartShutdownWatcher()
         {
             ShutdownService.ResetRuntimeState();
+
+            // 内存清了，磁盘也要清：否则用户改完设置立刻重启进程，
+            // LoadShutdownState 会把刚才已经作废的承诺又恢复回来。
+            SaveShutdownState();
 
             if (shutdownTimer != null)
             {

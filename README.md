@@ -221,7 +221,7 @@ sequenceDiagram
 
 ### 6. 卸载清理
 
-- 删除 `%LOCALAPPDATA%\SeewoOpt`（日志与更新缓存）
+- 删除 `%LOCALAPPDATA%\SeewoOpt`（日志、关机记账与更新缓存）
 - 顺带清理旧版本遗留的 `%LOCALAPPDATA%\TimeSyncTool`
 - 删除注册表 `HKCU\Software\TimeSyncTool`
 - 删除任务计划 `TimeSyncTool`
@@ -229,7 +229,7 @@ sequenceDiagram
 
 > 注册表项与任务计划名保留 `TimeSyncTool`，是因为它们是**已经写入系统的
 > 外部键**——改名会让老用户已保存的设置被重置、已注册的自启任务失联。
-> 数据目录只存日志与可再生的更新缓存，不含用户配置，因此已改名为 `SeewoOpt`。
+> 数据目录只存日志、关机记账（`shutdown-state.txt`）与可再生的更新缓存，不含用户配置，因此已改名为 `SeewoOpt`。
 
 ---
 

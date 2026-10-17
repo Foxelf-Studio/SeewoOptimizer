@@ -72,6 +72,13 @@ internal static class NtpClientTests
         TestShutdownWarnsOncePerWindow();
         TestShutdownWarnsAgainNextDay();
         TestShutdownSkipResumesNextDay();
+        // 补执行与状态持久化：覆盖“休眠/重启跨过关机点”的漏关场景
+        TestShutdownCatchUpWithinGrace();
+        TestShutdownCatchUpBeyondGrace();
+        TestShutdownStateRoundTrip();
+        TestShutdownStateKeepsSkip();
+        TestShutdownStateExpiresStalePromise();
+        TestShutdownStateRejectsGarbage();
         // 【顺序约束】TestSkipAbortDecision 会永久置位进程内的 _shutdownIssued，
         // 一旦置位，之后任何 SkipOnce 都会真的去调 shutdown /a。
         // 因此它必须排在所有会调用 SkipOnce 的测试之后
@@ -1668,6 +1675,170 @@ internal static class NtpClientTests
         var nextDayDue = ShutdownService.Poll(rules, new DateTime(2026, 10, 13, 23, 40, 0));
         Check("第二天 23:40 恢复关机（跳过只影响当天）",
             nextDayDue.ShouldShutdown, nextDayDue.ShouldShutdown ? "" : "跳过之后第二天不再关机");
+
+        ShutdownService.ResetRuntimeState();
+    }
+
+    /// <summary>
+    /// 关机点之后、宽限期之内仍应补执行。
+    ///
+    /// 旧实现只认 `当前分钟 == 承诺时刻`：休眠唤醒、重启、UI 线程卡顿
+    /// 只要跨过那一分钟，当天就再也不会关机。这是本组测试存在的唯一理由。
+    /// </summary>
+    private static void TestShutdownCatchUpWithinGrace()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 0, DayOfWeek.Monday)
+        };
+
+        ShutdownService.ResetRuntimeState();
+        ShutdownService.PromiseShutdown(new DateTime(2026, 10, 12, 23, 0, 0));
+
+        var late = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 4, 30));
+        Check("关机点后 4 分 30 秒仍应补执行",
+            late.ShouldShutdown,
+            late.ShouldShutdown ? "" : "错过一分钟就整天不关");
+        Check("补执行的目标时刻仍是原承诺 23:00",
+            late.DueAt == new DateTime(2026, 10, 12, 23, 0, 0),
+            $"得到 {late.DueAt:HH:mm}");
+
+        ShutdownService.MarkShutdown(late.DueAt);
+        var again = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 5, 0));
+        Check("补执行后不得重复执行",
+            !again.ShouldShutdown,
+            again.ShouldShutdown ? "同一轮关机会每 20 秒重复下发" : "");
+
+        ShutdownService.ResetRuntimeState();
+    }
+
+    /// <summary>
+    /// 超过宽限就放弃：不能让上午开机的机器去补执行前一晚的关机。
+    /// </summary>
+    private static void TestShutdownCatchUpBeyondGrace()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 0, DayOfWeek.Monday)
+        };
+
+        ShutdownService.ResetRuntimeState();
+        ShutdownService.PromiseShutdown(new DateTime(2026, 10, 12, 23, 0, 0));
+
+        var tooLate = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 11, 0));
+        Check("超过 10 分钟宽限不再补执行",
+            !tooLate.ShouldShutdown,
+            tooLate.ShouldShutdown ? "上午开机会补关前一晚的机器" : "");
+
+        ShutdownService.ResetRuntimeState();
+    }
+
+    /// <summary>
+    /// 状态持久化往返：承诺写盘、重新读回后仍能在宽限内补执行。
+    /// </summary>
+    private static void TestShutdownStateRoundTrip()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 0, DayOfWeek.Monday)
+        };
+
+        ShutdownService.ResetRuntimeState();
+        ShutdownService.PromiseShutdown(new DateTime(2026, 10, 12, 23, 0, 0));
+        string text = ShutdownService.ExportStateText();
+
+        ShutdownService.ResetRuntimeState();
+        string summary = ShutdownService.ImportStateText(text,
+            new DateTime(2026, 10, 12, 22, 57, 0));
+
+        Check("恢复状态应给出一句可读摘要",
+            !string.IsNullOrEmpty(summary), "摘要为空，日志里无法判断恢复到了什么");
+
+        var late = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 4, 0));
+        Check("重启后恢复的承诺仍能在宽限内补执行",
+            late.ShouldShutdown,
+            late.ShouldShutdown ? "" : "落盘了却没用上");
+
+        ShutdownService.ResetRuntimeState();
+    }
+
+    /// <summary>
+    /// “本次不关机”必须跨重启保留：用户已经明确拒绝过，
+    /// 重启后再问一次就是打扰，再关一次就是事故。
+    /// </summary>
+    private static void TestShutdownStateKeepsSkip()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 0, DayOfWeek.Monday)
+        };
+
+        ShutdownService.ResetRuntimeState();
+        ShutdownService.PromiseShutdown(new DateTime(2026, 10, 12, 23, 0, 0));
+        ShutdownService.SkipOnce(new DateTime(2026, 10, 12, 23, 0, 0));
+        string text = ShutdownService.ExportStateText();
+
+        ShutdownService.ResetRuntimeState();
+        ShutdownService.ImportStateText(text, new DateTime(2026, 10, 12, 22, 57, 0));
+
+        var r = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 0, 0));
+        Check("重启后仍记得「本次不关机」",
+            !r.ShouldShutdown,
+            r.ShouldShutdown ? "用户说过不关，重启后还是关了" : "");
+
+        ShutdownService.ResetRuntimeState();
+    }
+
+    /// <summary>
+    /// 过期承诺必须丢弃，不能在下次启动时突然关机。
+    /// </summary>
+    private static void TestShutdownStateExpiresStalePromise()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 0, DayOfWeek.Monday)
+        };
+
+        ShutdownService.ResetRuntimeState();
+        ShutdownService.PromiseShutdown(new DateTime(2026, 10, 12, 22, 0, 0));
+        string text = ShutdownService.ExportStateText();
+
+        ShutdownService.ResetRuntimeState();
+        string summary = ShutdownService.ImportStateText(text,
+            new DateTime(2026, 10, 12, 23, 0, 0));
+
+        Check("超过宽限的旧承诺应被丢弃",
+            summary.Contains("放弃"),
+            $"摘要未说明放弃原因：{summary}");
+
+        var r = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 0, 0));
+        Check("旧承诺不得在下次启动时突然关机",
+            !r.ShouldShutdown,
+            r.ShouldShutdown ? "上次运行的承诺把这次启动的机器关了" : "");
+
+        ShutdownService.ResetRuntimeState();
+    }
+
+    /// <summary>
+    /// 状态文件损坏时宁可当没有，也不能猜。
+    /// </summary>
+    private static void TestShutdownStateRejectsGarbage()
+    {
+        var rules = new System.Collections.Generic.List<ShutdownTimeRule>
+        {
+            MakeRule(23, 0, DayOfWeek.Monday)
+        };
+
+        ShutdownService.ResetRuntimeState();
+        string summary = ShutdownService.ImportStateText("not-a-state-file",
+            new DateTime(2026, 10, 12, 23, 0, 0));
+
+        Check("损坏的状态文件应被明确拒绝",
+            summary.Contains("格式"), $"实际摘要：{summary}");
+
+        var r = ShutdownService.Poll(rules, new DateTime(2026, 10, 12, 23, 0, 0));
+        Check("损坏状态不得产生关机承诺",
+            !r.ShouldShutdown, r.ShouldShutdown ? "损坏文件被当成了有效承诺" : "");
 
         ShutdownService.ResetRuntimeState();
     }
