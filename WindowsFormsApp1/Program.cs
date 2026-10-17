@@ -564,9 +564,46 @@ namespace SeewoOpt
                 // 单源失败只记一行：常见原因是 DNS 污染、IP 被拦、
                 // 或者 Gitee 仓库还没创建（404）。这些都属于"这个源用不了"，
                 // 不是"程序坏了"，不该让整次检查以异常收场。
-                WriteLog($"{sourceName} 版本查询失败：{ex.Message}");
+                //
+                // 【403 要单独说清楚】它不是网络不通，是 GitHub 的限流：
+                // 未认证请求每个出口 IP 每小时 60 次。学校几十台机器共用一个
+                // NAT 出口，早上开机高峰能在几分钟内撞满——这时日志里若只写
+                // "远程服务器返回错误: (403)"，看起来像被墙，排查方向就错了。
+                // 这也正是需要第二个源的原因之一。
+                HttpStatusCode? status = GetHttpStatus(ex);
+
+                if (status == HttpStatusCode.Forbidden && !isDomestic)
+                {
+                    WriteLog($"{sourceName} 版本查询失败：API 限流（403），"
+                           + "同一出口 IP 每小时只有 60 次未认证额度，本次跳过");
+                }
+                else if (status == HttpStatusCode.NotFound && isDomestic)
+                {
+                    WriteLog($"{sourceName} 版本查询失败：仓库或发行版不存在（404），"
+                           + "国内源尚未发布过这一版");
+                }
+                else
+                {
+                    WriteLog($"{sourceName} 版本查询失败：{ex.Message}");
+                }
+
                 return null;
             }
+        }
+
+        /// <summary>从 WebException 里取出 HTTP 状态码；不是 HTTP 错误则返回 null。</summary>
+        private static HttpStatusCode? GetHttpStatus(Exception ex)
+        {
+            WebException webException = ex as WebException;
+            if (webException == null) return null;
+
+            HttpWebResponse response = webException.Response as HttpWebResponse;
+            if (response == null) return null;
+
+            HttpStatusCode status = response.StatusCode;
+            // 取完就释放：这个响应体我们不读，留着只会占连接。
+            response.Close();
+            return status;
         }
 
         /// <summary>
