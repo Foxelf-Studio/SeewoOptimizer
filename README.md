@@ -326,4 +326,4 @@ Copyright (C) 2025-2026 **Foxelf Studio**
 - 提交 Issue：[GitHub Issues](https://github.com/Foxelf-Studio/SeewoOptimizer/issues)
 - 发邮件给我：thetimeflies@vip.qq.com
 
-提 Issue 时顺手贴上 `startup.log` 和界面上的「已守护 x 天」，比只写一句“用不了”有用得多——隔着屏幕我猜不出来。
+提 Issue 时尽量贴上 `startup.log` ，有助于更好地解决问题
