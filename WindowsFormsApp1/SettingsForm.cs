@@ -69,6 +69,26 @@ namespace SeewoOpt
             this.StartPosition = FormStartPosition.CenterParent;
             this.Font = new Font("Microsoft YaHei", 9);
 
+            // 图标必须和主窗口一致。
+            //
+            // 【为什么原来会不一样】主窗口在构造函数里用
+            // Icon.ExtractAssociatedIcon 取了 exe 的图标，而这里从来没设过，
+            // 于是设置窗口用的是 WinForms 默认的窗体图标——任务栏和 Alt+Tab
+            // 里两个窗口长得像两个程序。
+            //
+            // 直接复用父窗口的图标，比再 Extract 一次更稳：两者必定是同一个
+            // 对象，将来主窗口换图标时这里不会漏改。取不到就退回 exe 图标，
+            // 再取不到就不设（宁可显示系统默认，也不要抛异常）。
+            Icon appIcon = parentForm != null ? parentForm.Icon : null;
+            if (appIcon == null)
+                appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            if (appIcon != null)
+            {
+                // 克隆一份再赋值：两个窗体共用同一个 Icon 对象时，
+                // 任一方释放掉句柄，另一方下次重绘就会画不出图标。
+                this.Icon = (Icon)appIcon.Clone();
+            }
+
             // ---------------- 常规选项区 ----------------
             GroupBox optionGroup = new GroupBox
             {

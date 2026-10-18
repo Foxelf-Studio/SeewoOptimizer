@@ -83,7 +83,11 @@ namespace SeewoOpt.Services
                 SilentStart = false,
                 AutoVolume = true,
                 VolumeLevel = 60,
-                KillWps = true,
+                // 结束 WPS 进程默认关闭。
+                // 这个动作会直接杀掉用户正在编辑的文档，全新安装不该默认替人
+                // 做决定；需要的人在设置里勾上。已存过设置的老用户按注册表原值走，
+                // 不会被这条默认值改动。
+                KillWps = false,
                 // 需求：启动时不默认自动执行。
                 // 老用户升级时由一次性迁移补勾（AutoStartTaskUpgradePolicy），
                 // 全新安装保持这里的 false。
