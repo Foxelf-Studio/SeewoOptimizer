@@ -99,9 +99,33 @@ namespace SeewoOpt
         /// </summary>
         private static string _exitReason = "未标明";
 
+        // 本次启动是否由更新脚本拉起（命令行带 --restart）。
+        //
+        // 【为什么要这个标记】替换完文件后脚本会把程序重新启动，否则机器上
+        // 就再没有进程盯着关机时间点了。但用户并没有点任何东西，
+        // 这时弹一个窗口出来像是崩溃重启；所以要让它直接进托盘。
+        private static bool _startedByUpdater;
+
+        /// <summary>本次启动是否由更新脚本拉起</summary>
+        public static bool StartedByUpdater
+        {
+            get { return _startedByUpdater; }
+        }
+
         [STAThread]
         static void Main()
         {
+            // 更新脚本会带 --restart 拉起本程序。必须在单实例判断之前解析：
+            // 抢不到实例时的处理方式不同（见下面的注释）。
+            foreach (string arg in Environment.GetCommandLineArgs())
+            {
+                if (string.Equals(arg, "--restart", StringComparison.OrdinalIgnoreCase))
+                {
+                    _startedByUpdater = true;
+                    break;
+                }
+            }
+
             try
             {
                 // 【单实例检查必须在开日志分段之前】
@@ -117,6 +141,12 @@ namespace SeewoOpt
                 if (!IsSingleInstance())
                 {
                     // 抢不到实例说明已有程序在跑，此刻绝不能动日志文件。
+                    //
+                    // 更新后自启的这一次要静默退出：屏幕上没有任何用户操作，
+                    // 弹一个"程序已在运行中"的框只会让人莫名其妙。
+                    if (_startedByUpdater)
+                        return;
+
                     // 提示框在下面（需要在显示前确保日志服务不被误用）。
                     MessageBox.Show("程序已在运行中。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
@@ -954,7 +984,7 @@ namespace SeewoOpt
             // （把模板留在本类里时，探针只能自己另写一份批处理来测，
             //   结果我漏掉四个闭合引号它也没发现）。
             string batchContent = UpdateScriptLauncher.BuildScriptContent(
-                currentExe, newExe, backupExe, pendingFile);
+                currentExe, newExe, backupExe, pendingFile, restartAfterUpdate: true);
 
             // 【为什么不再用环境变量传路径——两个独立的坑，都踩过】
             //   1. `EnvironmentVariables` 只在 `UseShellExecute = false` 时可用，

@@ -89,8 +89,22 @@ namespace SeewoOpt.Services
         /// 全部走 ASCII：批处理默认按 GBK 解析，脚本里出现中文会解析错乱。
         /// </summary>
         public static string BuildScriptContent(string targetExe, string newExe,
-                                                string backupExe, string pendingFile)
+                                                string backupExe, string pendingFile,
+                                                bool restartAfterUpdate)
         {
+            // 替换完成后必须把程序拉起来。
+            //
+            // 【为什么这是必须的，不是"顺手加的"】本程序是常驻托盘的，
+            // 关机守候完全依赖这个进程活着。更新脚本如果把文件换掉就完事，
+            // 结果是：机器上再没有任何进程盯着关机时间点，当晚该关的机不会关，
+            // 而且日志里看不出异常——上一个进程是"正常退出，准备更新"。
+            // 用户第二天看到的只是"昨天没关机"，很难联想到是更新干的。
+            //
+            // --restart 是给程序自己的信号：这次启动是更新脚本拉起来的，
+            // 应当直接进托盘，不要凭空弹一个窗口出来。
+            string restartCommand =
+                @"if exist ""%TARGET%"" start """" /d ""%TARGET_DIR%"" ""%TARGET%"" --restart";
+
             string template = @"@echo off
 setlocal enabledelayedexpansion
 title Updating
@@ -100,6 +114,9 @@ set ""SOURCE=@@SOURCE@@""
 set ""BACKUP=@@BACKUP@@""
 set ""PENDING=@@PENDING@@""
 set ""TARGET_NAME=@@TARGET_NAME@@""
+:: Directory of the target, so the restarted program starts in its own folder
+for %%F in (""%TARGET%"") do set ""TARGET_DIR=%%~dpF""
+if ""%TARGET_DIR:~-1%""==""\"" set ""TARGET_DIR=%TARGET_DIR:~0,-1%""
 
 :: Give the main process time to fully exit
 ping -n 3 127.0.0.1 > nul
@@ -138,6 +155,11 @@ if exist ""%BACKUP%"" (
 )
 echo UPDATE_FAILED > ""%PENDING%""
 del /f /q ""%SOURCE%"" > nul 2>&1
+
+:: Replacement failed but the old binary is still usable (restored above).
+:: Start it back up anyway: an update failure must not cost the user the
+:: shutdown watcher as well.
+@@RESTART_FAILURE@@
 exit /b 1
 
 :success
@@ -150,6 +172,10 @@ del /f /q ""%SOURCE%"" > nul 2>&1
 del /f /q ""%SOURCE%.sig"" > nul 2>&1
 del /f /q ""%BACKUP%"" > nul 2>&1
 del /f /q ""%PENDING%"" > nul 2>&1
+
+:: Bring the program back. This is not cosmetic: it is the only process
+:: watching the configured shutdown time, and it just replaced itself.
+@@RESTART_SUCCESS@@
 ::
 :: [WHY THIS SCRIPT DOES NOT DELETE ITSELF]
 :: It used to end with  del /f /q ""%~f0""  followed by  exit /b 0.
@@ -168,7 +194,12 @@ exit /b 0
                 .Replace("@@SOURCE@@", EscapeForBatch(newExe))
                 .Replace("@@BACKUP@@", EscapeForBatch(backupExe))
                 .Replace("@@PENDING@@", EscapeForBatch(pendingFile))
-                .Replace("@@TARGET_NAME@@", EscapeForBatch(Path.GetFileName(targetExe)));
+                .Replace("@@TARGET_NAME@@", EscapeForBatch(Path.GetFileName(targetExe)))
+                // 探针演练时目标是个假文件（不是可执行映像），
+                // 真去 start 会弹出"此应用无法在你的电脑上运行"并卡住，
+                // 所以它传 false，把这两行换成 rem；产品路径永远是 true。
+                .Replace("@@RESTART_SUCCESS@@", restartAfterUpdate ? restartCommand : "rem restart disabled")
+                .Replace("@@RESTART_FAILURE@@", restartAfterUpdate ? restartCommand : "rem restart disabled");
         }
 
         /// <summary>

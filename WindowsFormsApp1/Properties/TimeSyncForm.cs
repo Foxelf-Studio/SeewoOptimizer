@@ -667,9 +667,14 @@ namespace SeewoOpt
                     Program.PendingUpdateInfo = null;
                 }
 
-                if (SilentStart)
+                // 更新脚本替换完文件后会把本程序重新拉起（带 --restart）。
+                // 那一次同样直接进托盘：用户没有点任何东西，凭空弹一个窗口
+                // 出来只会像是"程序崩了又自己重启"。
+                if (SilentStart || Program.StartedByUpdater)
                 {
-                    WriteLog("静默启动，隐藏窗口到托盘");
+                    WriteLog(Program.StartedByUpdater
+                        ? "更新完成，由更新脚本拉起，隐藏窗口到托盘"
+                        : "静默启动，隐藏窗口到托盘");
                     this.WindowState = FormWindowState.Minimized;
                     this.ShowInTaskbar = false;
                     MinimizeToTray();

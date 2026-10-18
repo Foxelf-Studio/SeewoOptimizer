@@ -161,7 +161,32 @@ namespace SeewoOpt.Tools
             File.WriteAllText(pending, source);
 
             string content = UpdateScriptLauncher.BuildScriptContent(
-                target, source, backup, pending);
+                target, source, backup, pending, restartAfterUpdate: false);
+
+            // 生产路径（restart=true）单独生成一份做静态核对：
+            // 演练目标是个假 exe，真去 start 会弹出"此应用无法在你的电脑上运行"
+            // 并卡住探针，所以演练那份把重启换成了 rem。
+            string production = UpdateScriptLauncher.BuildScriptContent(
+                target, source, backup, pending, restartAfterUpdate: true);
+
+            const string restartSnippet =
+                "start \"\" /d \"%TARGET_DIR%\" \"%TARGET%\" --restart";
+
+            Check("生产脚本会在替换后重新启动程序（带 --restart）",
+                production.Contains(restartSnippet),
+                "缺这一行，更新完就没有进程守候关机时间点了");
+
+            Check("成功与失败两条路径都会把程序拉起来",
+                CountOccurrences(production, restartSnippet) == 2,
+                $"只出现 {CountOccurrences(production, restartSnippet)} 次：替换失败时同样不能让人丢了守候");
+
+            Check("演练脚本（restart=false）不含 start，不会拉起假 exe",
+                !content.Contains("start \"\""),
+                "探针的目标不是可执行映像，真 start 会弹系统错误框并卡住");
+
+            Check("重启前先算出目标所在目录",
+                content.Contains("for %%F in (\"%TARGET%\") do set \"TARGET_DIR=%%~dpF\""),
+                "工作目录算错会让程序在别处启动");
             File.WriteAllText(script, content, Encoding.ASCII);
 
             // 先静态核对生成出来的脚本：set 行的引号必须成对（我在这里栽过一次）
@@ -203,6 +228,19 @@ namespace SeewoOpt.Tools
         private static long SafeLen(string path)
         {
             try { return new FileInfo(path).Length; } catch { return -1; }
+        }
+
+        private static int CountOccurrences(string text, string needle)
+        {
+            if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(needle)) return 0;
+
+            int count = 0, index = 0;
+            while ((index = text.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+            {
+                count++;
+                index += needle.Length;
+            }
+            return count;
         }
 
         /// <summary>
