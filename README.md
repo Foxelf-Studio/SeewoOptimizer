@@ -326,7 +326,6 @@ Copyright (C) 2025-2026 **Foxelf Studio**
 1. **衍生作品必须以同样的 AGPL-3.0 许可证开源。** 如果你修改了本项目并对外分发，必须提供完整的对应源代码。
 2. **网络服务同样适用。** 如果你基于本项目修改后部署为网络服务供他人使用，必须向这些用户提供你修改后的源代码。（这是 AGPL 相对于普通 GPL 的关键附加条款，也是选择它的原因。）
 
-简单说：**拿去用可以，改了要开源，别把改进藏起来。**
 
 > 本项目为教学场景下的实用工具，按“现状”提供，不附带任何明示或暗示的担保。详见 LICENSE 第 15、16 条。
 
@@ -337,4 +336,4 @@ Copyright (C) 2025-2026 **Foxelf Studio**
 - 提交 Issue：[GitHub Issues](https://github.com/Foxelf-Studio/SeewoOptimizer/issues)
 - 发邮件给我：thetimeflies@vip.qq.com
 
-提 Issue 时尽量贴上 `startup.log` ，有助于更好地解决问题
+提 Issue 时尽量把 `startup.log` ***配了***，有助于更好地解决问题。
