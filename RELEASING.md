@@ -57,6 +57,22 @@ CI 在推送 `v*` 标签时会：
 
 因此“标签写 26.10.17、程序集还是 26.10.11”这种错误会在 CI 就暴露，不会等到用户更新时才发现。
 
+## README 以 GitHub 为准
+
+两个仓库都有 README，但**只有 GitHub 那份是源**。在 Gitee 网页上直接编辑会造成分叉：
+v26.10.19 发布前就撞过一次，Gitee 那份还停在旧底稿（写着“后台检测 GitHub Releases”），
+而 GitHub 上早已改成双源。
+
+改完 GitHub 的 README 后，把代码同步过去（只推分支，不建发行版、不需要附件）：
+
+```bat
+set GITEE_TOKEN=<你的私人令牌>
+python tools\publish_gitee.py --sync-only
+```
+
+如果提示 `! [rejected] master -> master (fetch first)`，说明 Gitee 上又有人直接改过，
+先把两边的差异看一眼再合并，不要强推——上一次就是 Gitee 侧基于旧底稿改了三次。
+
 ## 同步发布到 Gitee（国内更新源）
 
 教室网络里 GitHub 经常整段不可达：`api.github.com` 被 DNS 污染、

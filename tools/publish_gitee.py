@@ -109,11 +109,13 @@ def main():
     parser.add_argument("--token", default=os.environ.get("GITEE_TOKEN"),
                         help="Gitee 私人令牌（默认读环境变量 GITEE_TOKEN）")
     parser.add_argument("--repo", default=DEFAULT_REPO, help="仓库路径 owner/repo")
-    parser.add_argument("--tag", required=True, help="版本标签，必须与 GitHub 完全一致")
+    parser.add_argument("--tag", help="版本标签，必须与 GitHub 完全一致；--sync-only 时可省略")
     parser.add_argument("--notes", help="发行说明 Markdown 文件")
-    parser.add_argument("--exe", required=True, help="SeewoOpt.exe")
-    parser.add_argument("--sig", required=True, help="SeewoOpt.exe.sig")
+    parser.add_argument("--exe", help="SeewoOpt.exe")
+    parser.add_argument("--sig", help="SeewoOpt.exe.sig")
     parser.add_argument("--no-push", action="store_true", help="不推送代码与标签")
+    parser.add_argument("--sync-only", action="store_true",
+                        help="只把 master（和给定标签）推到 Gitee，不建发行版")
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不执行")
     args = parser.parse_args()
 
@@ -132,31 +134,46 @@ def main():
             return 2
         print("令牌有效：%s" % me.get("login"))
 
-    # 附件名必须与 GitHub 上完全一致：客户端拼 .sig 地址时是
-    # 在 exe 地址后面直接加后缀，改名就对不上。
-    exe_name = os.path.basename(args.exe)
-    sig_name = os.path.basename(args.sig)
-    if sig_name != exe_name + ".sig":
-        print("附件名不合法：%s 必须是 %s.sig" % (sig_name, exe_name))
-        return 2
-
-    for path in (args.exe, args.sig):
-        if not os.path.isfile(path):
-            print("找不到文件：%s" % path)
+    if args.sync_only:
+        print("仓库: %s" % args.repo)
+        print("模式: 仅同步代码" + ("（含标签 %s）" % args.tag if args.tag else ""))
+    else:
+        if not args.tag:
+            print("缺少 --tag（或用 --sync-only 只同步代码）")
+            return 2
+        if not args.exe or not args.sig:
+            print("缺少 --exe / --sig（或用 --sync-only 只同步代码）")
             return 2
 
-    if args.notes and not os.path.isfile(args.notes):
-        print("找不到发行说明：%s" % args.notes)
-        return 2
+        # 附件名必须与 GitHub 上完全一致：客户端拼 .sig 地址时是
+        # 在 exe 地址后面直接加后缀，改名就对不上。
+        exe_name = os.path.basename(args.exe)
+        sig_name = os.path.basename(args.sig)
+        if sig_name != exe_name + ".sig":
+            print("附件名不合法：%s 必须是 %s.sig" % (sig_name, exe_name))
+            return 2
 
-    print("仓库: %s" % args.repo)
-    print("标签: %s" % args.tag)
-    print("附件: %s / %s" % (exe_name, sig_name))
+        for path in (args.exe, args.sig):
+            if not os.path.isfile(path):
+                print("找不到文件：%s" % path)
+                return 2
+
+        if args.notes and not os.path.isfile(args.notes):
+            print("找不到发行说明：%s" % args.notes)
+            return 2
+
+        print("仓库: %s" % args.repo)
+        print("标签: %s" % args.tag)
+        print("附件: %s / %s" % (exe_name, sig_name))
 
     # 1) 推代码与标签。客户端只读发行版，但没有 tag 就建不了发行版。
     if not args.no_push:
+        refs = ["refs/heads/master"]
+        if args.tag:
+            refs.append("refs/tags/%s" % args.tag)
+
         remote = "https://oauth2:%s@gitee.com/%s.git" % (token, args.repo)
-        for ref in ("refs/heads/master", "refs/tags/%s" % args.tag):
+        for ref in refs:
             cmd = ["git", "-c", "credential.helper=", "push", remote, ref]
             print("\n[git] push %s" % ref)
             if args.dry_run:
@@ -169,6 +186,10 @@ def main():
             if proc.returncode != 0:
                 print("  推送失败")
                 return 1
+
+    if args.sync_only:
+        print("\n完成：代码已同步到 Gitee。")
+        return 0
 
     # 2) 建发行版（已存在就复用，方便重传附件）
     release = find_release(args.repo, args.tag, token)
