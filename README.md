@@ -55,7 +55,7 @@
 
 ### 1. 首次运行
 
-从 [GitHub发行版](https://github.com/Foxelf-Studio/SeewoOptimizer/releases) [Gitee发行版](https://gitee.com/Foxelf-Studio/SeewoOptimizer/releases)下载最新版，放到任意文件夹，双击 `SeewoOpt.exe`。
+从 [GitHub发行版](https://github.com/Foxelf-Studio/SeewoOptimizer/releases) / [Gitee发行版](https://gitee.com/Foxelf-Studio/SeewoOptimizer/releases)下载最新版，放到任意文件夹，双击 `SeewoOpt.exe`。
 
 首次启动会：
 
