@@ -1,0 +1,28 @@
+[Unit]
+Description=SeewoOpt crash report receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=seewo
+Group=seewo
+WorkingDirectory=/opt/seewo-report
+Environment=SEEWO_DIR=/var/lib/seewo-report
+Environment=PORT=80
+Environment=PYTHONDONTWRITEBYTECODE=1
+# 口令写在单独的环境文件里，别放进 unit（unit 会被 git 看到）
+EnvironmentFile=/etc/seewo-report.env
+ExecStart=/usr/bin/python3 /opt/seewo-report/app.py
+Restart=always
+RestartSec=3
+
+# 80 端口需要特权，但不该为此用 root 跑
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/seewo-report
+
+[Install]
+WantedBy=multi-user.target

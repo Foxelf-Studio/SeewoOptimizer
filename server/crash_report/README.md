@@ -18,28 +18,16 @@
 
 ## 部署选型
 
-### A. 自己的 VPS / 轻量服务器（推荐，最直接）
+**已定：腾讯云轻量应用服务器**，完整步骤见 [DEPLOY.md](DEPLOY.md)。
+选它的理由：只有这条路能用现成代码（已端到端测过），数据在自己磁盘上，
+有现成网页看板，不依赖任何厂商 SDK。
 
-```bat
-set SEEWO_TOKEN=换成长随机串
-set SEEWO_DIR=D:\seewo-reports
-python app.py
-```
+其余两种仅作备选记录：
 
-前面挂 Nginx/Caddy 上 HTTPS，然后把 `https://你的域名/report` 填进客户端。
-
-### B. 腾讯云函数 SCF（无服务器，国内可达，免费额度足够）
-
-新建 Python 函数，把 `app.py` 里的 `Handler.do_POST` 逻辑改成 SCF 的 `main_handler(event, context)`：
-解析 `event["body"]`、校验 `event["headers"]["x-report-token"]`，把 JSON 追加到 COS
-（或直接 `print` 到日志服务 CLS，用 CLS 的检索看）。HTTP 触发器给的就是公网地址。
-
-选它的理由：教室网络访问国内云比访问 GitHub/Cloudflare 稳得多。
-
-### C. Cloudflare Worker（不推荐）
-
-部署最快，但国内访问 `workers.dev` 与 GitHub 一样时通时不通——而这个功能恰恰要靠
-那些网络不好的机器上报。除非你有备案域名 + 国内 CDN，否则别用。
+- **云函数 SCF**：更省（按量、几乎 0 元），但存储要接 COS 或日志服务，
+  查看体验差，且要另写一套上传逻辑。
+- **Cloudflare Worker**：不推荐。国内访问 `workers.dev` 时通时不通，
+  而这个功能恰恰要靠网络差的机器上报。
 
 ## 客户端怎么接上
 
