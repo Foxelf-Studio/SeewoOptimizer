@@ -119,6 +119,10 @@ namespace SeewoOpt
 
             chkCrashReport = NewCheckBox("任务失败时自动上报日志（不含个人信息）", new Point(16, 146));
 
+            // 没配上报端点时，这个开关点与不点都没区别——干脆不显示，
+            // 而不是给用户一个不起作用的选项。
+            chkCrashReport.Visible = CrashReporter.IsConfigured;
+
             optionGroup.Controls.Add(chkAutoStart);
             optionGroup.Controls.Add(chkSilentStart);
             optionGroup.Controls.Add(chkAutoStartTask);

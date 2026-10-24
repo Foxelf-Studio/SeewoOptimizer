@@ -2039,7 +2039,7 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
             // 设备标识：首次运行生成一次，之后一直沿用。
             // 与硬件无关（不是 MachineGuid），重装即变——只需要"是不是同一台"，
             // 不需要跨重装追踪。
-            if (string.IsNullOrEmpty(settings.DeviceId))
+            if (CrashReporter.IsConfigured && string.IsNullOrEmpty(settings.DeviceId))
             {
                 string newId = Guid.NewGuid().ToString("N");
                 settings.DeviceId = newId;

@@ -66,6 +66,18 @@ namespace SeewoOpt.Services
         /// <summary>匿名设备标识（随机 GUID，首次运行生成，重装即变）</summary>
         public static string DeviceId = "";
 
+        /// <summary>
+        /// 是否已经配好上报端点。
+        ///
+        /// 【为什么界面要问这个】没配端点时上报是彻底的空操作，
+        /// 此时若还在设置里摆一个"任务失败时自动上报"的开关，
+        /// 等于给用户一个不起作用的承诺。没配好就连控件一起藏起来。
+        /// </summary>
+        public static bool IsConfigured
+        {
+            get { return !string.IsNullOrEmpty(Endpoint); }
+        }
+
         /// <summary>日志尾部最多带多少字符。够看清失败上下文，又不至于让请求过大。</summary>
         private const int LogTailChars = 12 * 1024;
 
