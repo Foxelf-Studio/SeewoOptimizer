@@ -64,5 +64,11 @@
       资产列表里还混着源码包——这两点必须由测试钉住。
     -->
     <Compile Include="..\WindowsFormsApp1\Services\ReleaseInfoParser.cs" />
+    <!--
+      失败上报的脱敏与节流是纯逻辑，必须能离线验证：
+      "发出去的日志里不许有用户名/IP"这条如果只靠肉眼，迟早会漏。
+    -->
+    <Compile Include="..\WindowsFormsApp1\Services\BuildInfo.cs" />
+    <Compile Include="..\WindowsFormsApp1\Services\CrashReporter.cs" />
   </ItemGroup>
 </Project>

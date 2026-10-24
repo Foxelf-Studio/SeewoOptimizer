@@ -31,6 +31,7 @@ namespace SeewoOpt
         private CheckBox chkAutoVolume;
         private NumericUpDown numVolumeLevel;
         private CheckBox chkKillWps;
+        private CheckBox chkCrashReport;
 
         // --- 下半部分：关机时间点 ---
         private Panel rulesPanel;
@@ -62,7 +63,7 @@ namespace SeewoOpt
         private void BuildLayout()
         {
             this.Text = "系统优化设置";
-            this.ClientSize = new Size(560, 440);
+            this.ClientSize = new Size(560, 470);
             this.FormBorderStyle = FormBorderStyle.FixedSingle;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
@@ -94,7 +95,7 @@ namespace SeewoOpt
             {
                 Text = "常规",
                 Location = new Point(12, 10),
-                Size = new Size(536, 150)
+                Size = new Size(536, 176)
             };
 
             chkAutoStart = NewCheckBox("开机自启动", new Point(16, 26));
@@ -116,19 +117,22 @@ namespace SeewoOpt
 
             chkKillWps = NewCheckBox("自动执行结束 WPS 进程任务", new Point(16, 122));
 
+            chkCrashReport = NewCheckBox("任务失败时自动上报日志（不含个人信息）", new Point(16, 146));
+
             optionGroup.Controls.Add(chkAutoStart);
             optionGroup.Controls.Add(chkSilentStart);
             optionGroup.Controls.Add(chkAutoStartTask);
             optionGroup.Controls.Add(chkAutoVolume);
             optionGroup.Controls.Add(numVolumeLevel);
             optionGroup.Controls.Add(chkKillWps);
+            optionGroup.Controls.Add(chkCrashReport);
             this.Controls.Add(optionGroup);
 
             // ---------------- 关机时间点区 ----------------
             GroupBox shutdownGroup = new GroupBox
             {
                 Text = "定时关机（最多 5 个时间点，执行前 5 分钟提醒）",
-                Location = new Point(12, 168),
+                Location = new Point(12, 194),
                 Size = new Size(536, 224)
             };
 
@@ -174,7 +178,7 @@ namespace SeewoOpt
             btnSave = new Button
             {
                 Text = "保存",
-                Location = new Point(455, 400),
+                Location = new Point(455, 426),
                 Size = new Size(90, 30),
                 DialogResult = DialogResult.None
             };
@@ -184,7 +188,7 @@ namespace SeewoOpt
             Button btnCancel = new Button
             {
                 Text = "取消",
-                Location = new Point(358, 400),
+                Location = new Point(358, 426),
                 Size = new Size(90, 30)
             };
             btnCancel.Click += (s, e) => this.Close();
@@ -416,6 +420,7 @@ namespace SeewoOpt
             chkAutoVolume.Checked = parentForm.AutoVolume;
             numVolumeLevel.Value = Clamp(parentForm.VolumeLevel, 0, 100);
             chkKillWps.Checked = parentForm.KillWps;
+            chkCrashReport.Checked = parentForm.CrashReport;
 
             // 装载现有规则。用副本——若用户的编辑被取消，
             // 运行中的配置必须保持原样（parentForm.ShutdownRules 返回的就是副本）。
@@ -486,6 +491,7 @@ namespace SeewoOpt
             parentForm.AutoVolume = chkAutoVolume.Checked;
             parentForm.VolumeLevel = (int)numVolumeLevel.Value;
             parentForm.KillWps = chkKillWps.Checked;
+            parentForm.CrashReport = chkCrashReport.Checked;
             parentForm.ShutdownRules = rules;
 
             parentForm.SaveSettings();

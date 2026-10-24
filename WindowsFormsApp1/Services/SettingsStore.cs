@@ -27,6 +27,27 @@ namespace SeewoOpt.Services
         public bool KillWps { get; set; }
 
         /// <summary>
+        /// 任务失败时是否自动上报日志与设备基本信息。
+        ///
+        /// 【默认开启，但用户可关】这条默认值是用户明确要求的：出了问题
+        /// 拿不到日志，等于每次都要靠猜。代价是必须把"发了什么"讲清楚，
+        /// 并且发送前脱敏（见 <see cref="CrashReporter.Redact"/>）：
+        /// 用户目录、计算机名、用户名、IP 一律替换掉。
+        ///
+        /// 只上报失败，不做使用统计，不记录用户操作。
+        /// </summary>
+        public bool CrashReport { get; set; }
+
+        /// <summary>
+        /// 匿名设备标识。首次上报前随机生成，与硬件无关，重装即变。
+        ///
+        /// 【为什么不用 MachineGuid / 硬盘序列号】那是可追溯的稳定硬件标识，
+        /// 性质完全不同——本项目只需要"这是不是同一台机器"，
+        /// 不需要、也不该做到跨重装追踪。
+        /// </summary>
+        public string DeviceId { get; set; }
+
+        /// <summary>
         /// 程序启动时是否自动开始执行既定任务。
         ///
         /// 【默认 false】用户明确要求"启动时不再默认自动执行"——
@@ -88,6 +109,10 @@ namespace SeewoOpt.Services
                 // 做决定；需要的人在设置里勾上。已存过设置的老用户按注册表原值走，
                 // 不会被这条默认值改动。
                 KillWps = false,
+                // 失败上报默认开启：没有日志的故障反馈基本等于没有反馈。
+                // 代价是用户可关、内容脱敏、只报失败（见属性注释）。
+                CrashReport = true,
+                DeviceId = "",
                 // 需求：启动时不默认自动执行。
                 // 老用户升级时由一次性迁移补勾（AutoStartTaskUpgradePolicy），
                 // 全新安装保持这里的 false。
@@ -236,6 +261,8 @@ namespace SeewoOpt.Services
                         settings.AutoVolume = ReadBool(key, "AutoVolume", settings.AutoVolume);
                         settings.VolumeLevel = ReadInt(key, "VolumeLevel", settings.VolumeLevel);
                         settings.KillWps = ReadBool(key, "KillWps", settings.KillWps);
+                        settings.CrashReport = ReadBool(key, "CrashReport", settings.CrashReport);
+                        settings.DeviceId = ReadString(key, "DeviceId", settings.DeviceId);
                         settings.AutoStartTask = ReadBool(key, "AutoStartTask", settings.AutoStartTask);
                         settings.FirstRunDate = ReadDate(key, "FirstRunDate", settings.FirstRunDate);
                         settings.LastKnownGuardedDays =
@@ -276,6 +303,9 @@ namespace SeewoOpt.Services
                         key.SetValue("AutoVolume", settings.AutoVolume);
                         key.SetValue("VolumeLevel", settings.VolumeLevel);
                         key.SetValue("KillWps", settings.KillWps);
+                        key.SetValue("CrashReport", settings.CrashReport);
+                        if (!string.IsNullOrEmpty(settings.DeviceId))
+                            key.SetValue("DeviceId", settings.DeviceId);
                         key.SetValue("AutoStartTask", settings.AutoStartTask);
 
                         // 首次运行日期只在"尚未记录"时写入一次。
@@ -397,6 +427,26 @@ namespace SeewoOpt.Services
             catch
             {
                 LogService.Write($"设置项 {name} 类型异常({value?.GetType().Name ?? "null"})，使用默认值 {defaultValue}");
+                return defaultValue;
+            }
+        }
+
+        /// <summary>读取字符串，容忍类型不一致的情况</summary>
+        private static string ReadString(RegistryKey key, string name, string defaultValue)
+        {
+            object value = key.GetValue(name, defaultValue);
+            if (value == null) return defaultValue;
+
+            string text = value as string;
+            if (text != null) return text;
+
+            try
+            {
+                return Convert.ToString(value);
+            }
+            catch
+            {
+                LogService.Write($"设置项 {name} 类型异常，使用默认值");
                 return defaultValue;
             }
         }

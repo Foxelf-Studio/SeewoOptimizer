@@ -35,6 +35,15 @@ namespace SeewoOpt
         private const string GITEE_API = "https://gitee.com/api/v5/repos/Foxelf-Studio/SeewoOptimizer/releases/latest";
         private const string GITHUB_USER_AGENT = "SeewoOptimizer-Updater";
 
+        // ---- 失败上报 ----
+        //
+        // 留空 = 不上报。这是刻意的：没有可用的接收端时，客户端不该往一个
+        // 不存在的地址发数据，也不该把"发不出去"写进日志刷屏。
+        // 部署好接收端（见 server/crash_report/README.md）后把地址填在这里，
+        // 再发一版才生效。
+        private const string CRASH_REPORT_URL = "";
+        private const string CRASH_REPORT_TOKEN = "";
+
         // 查版本这一步的预算（秒）。
         // WebClient 没有 Timeout 属性，底层默认约 100 秒；原来这里没包超时，
         // 网络不通时表现为"检查更新像卡死"，而不是快速失败并换源。
@@ -128,6 +137,10 @@ namespace SeewoOpt
 
             try
             {
+                // 上报端点：为空时 CrashReporter 直接返回，不做任何网络操作
+                CrashReporter.Endpoint = CRASH_REPORT_URL;
+                CrashReporter.Token = CRASH_REPORT_TOKEN;
+
                 // 【单实例检查必须在开日志分段之前】
                 // 日志文件是**多进程共用**的，而分段模型默认"同一时刻只有一次运行在写"。
                 // 若第二个实例先开一段、又匆匆写下自己的结束标记，而第一个实例仍在运行，
@@ -182,6 +195,11 @@ namespace SeewoOpt
                     WriteLog($"========== 线程异常 ==========");
                     WriteLog($"异常消息: {e.Exception.Message}");
                     WriteLog($"异常堆栈: {e.Exception.StackTrace}");
+
+                    // 异常已经在界面上弹过框了，这里补一条上报：
+                    // 用户往往只会说"它报错了"，堆栈只有日志里有。
+                    CrashReporter.Report("ui_exception", e.Exception.ToString());
+
                     MessageBox.Show($"发生未处理的异常：{e.Exception.Message}\n\n程序将关闭。",
                         "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 };
@@ -192,6 +210,9 @@ namespace SeewoOpt
                     WriteLog($"========== 致命异常 ==========");
                     WriteLog($"异常消息: {ex?.Message ?? "未知错误"}");
                     WriteLog($"异常堆栈: {ex?.StackTrace ?? ""}");
+
+                    CrashReporter.Report("fatal_exception", ex == null ? "未知错误" : ex.ToString());
+
                     MessageBox.Show($"发生致命错误：{ex?.Message ?? "未知错误"}\n\n程序将关闭。",
                         "致命错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 };
@@ -675,6 +696,13 @@ namespace SeewoOpt
 
             Stopwatch budget = Stopwatch.StartNew();
 
+            // 只上报"非网络原因"的失败。
+            //
+            // 更新失败绝大多数是被墙、限流、DNS 污染——那是环境问题，
+            // 每台机器每天报一次只会把真正的信号埋掉。而验签失败、
+            // 版本不符、脚本起不来这几类是我们的问题，必须报。
+            Exception reportable = null;
+
             for (int round = 1; round <= 2; round++)
             {
                 for (int i = 0; i < downloadUrls.Count; i++)
@@ -683,6 +711,7 @@ namespace SeewoOpt
                     {
                         WriteLog($"更新下载已用尽 {totalBudgetMs / 1000} 秒总预算，停止尝试");
                         WriteLog("更新最终失败，程序保持原版本继续运行（未做任何改动）");
+                        ReportUpdateFailure(reportable);
                         return false;
                     }
 
@@ -700,6 +729,9 @@ namespace SeewoOpt
                         // 哈希与发布说明一致"，紧接着却是一行"下载失败"——
                         // 排查方向被完全带偏（那次真正失败的是启动脚本）。
                         WriteLog($"更新失败（第 {round} 轮，源 {i + 1}/{downloadUrls.Count}）: {ex.Message}");
+
+                        if (!(ex is WebException) && !(ex is TimeoutException))
+                            reportable = ex;
                     }
                 }
 
@@ -711,7 +743,14 @@ namespace SeewoOpt
             }
 
             WriteLog("更新最终失败，程序保持原版本继续运行（未做任何改动）");
+            ReportUpdateFailure(reportable);
             return false;
+        }
+
+        private static void ReportUpdateFailure(Exception error)
+        {
+            if (error == null) return;
+            CrashReporter.Report("update_failed", error.ToString());
         }
 
        

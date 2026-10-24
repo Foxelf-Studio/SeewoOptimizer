@@ -122,6 +122,11 @@ internal static class NtpClientTests
         TestVersionMatchesRejectsOlderBuild();
         TestGiteeReleaseJsonParsesWithoutSize();
 
+        // --- 失败上报（脱敏 / 内容 / 节流）---
+        TestCrashReportRedactsIdentity();
+        TestCrashReportPayloadShape();
+        TestCrashReportThrottle();
+
         // --- 畸形输入 ---
         TestRejectsShortPacket();
         TestRejectsNullPacket();
@@ -2511,6 +2516,99 @@ internal static class NtpClientTests
         Check("Gitee：仍能从发行说明里提取 SHA256",
             ReleaseInfoParser.TryExtractExpectedSha256(release.Body)
                 == "F8CF4CB4CC73FB171731F7161437A79BDADB571FFBD4FC681D97B055C0CF288B");
+    }
+
+    // ---------------------------------------------------------------
+    // 失败上报
+    // ---------------------------------------------------------------
+
+    /// <summary>
+    /// 脱敏：日志里天生带完整路径和用户名，原样发出去等于泄露使用者的身份。
+    /// 这几条断言守的是"发出去的内容不含姓名/IP"这条底线。
+    /// </summary>
+    private static void TestCrashReportRedactsIdentity()
+    {
+        string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        string user = Environment.UserName;
+        string machine = Environment.MachineName;
+
+        string input = "路径 " + Path.Combine(profile, "桌面", "课件.pptx")
+                     + " 用户 " + user
+                     + " 机器 " + machine
+                     + " 服务器 192.168.1.23";
+
+        string output = SeewoOpt.Services.CrashReporter.Redact(input);
+
+        Check("上报脱敏：用户目录被替换",
+            string.IsNullOrEmpty(profile) || !output.Contains(profile, StringComparison.OrdinalIgnoreCase),
+            output);
+
+        Check("上报脱敏：计算机名被替换",
+            machine.Length < 3 || output.Contains("<pc>", StringComparison.OrdinalIgnoreCase),
+            output);
+
+        Check("上报脱敏：用户名被替换",
+            user.Length < 3 || output.Contains("<user>", StringComparison.OrdinalIgnoreCase),
+            output);
+
+        Check("上报脱敏：IPv4 被替换",
+            output.Contains("<ip>") && !output.Contains("192.168.1.23"),
+            output);
+
+        Check("上报脱敏：文件名等排查信息保留", output.Contains("课件.pptx"), output);
+    }
+
+    /// <summary>上报内容的字段与时间格式必须和服务端约定一致。</summary>
+    private static void TestCrashReportPayloadShape()
+    {
+        SeewoOpt.Services.CrashReporter.DeviceId = "abc123";
+        var payload = SeewoOpt.Services.CrashReporter.BuildPayload(
+            "sync_failed",
+            "全部服务器失败，对端 10.0.0.8",
+            new DateTime(2026, 10, 24, 10, 0, 0, DateTimeKind.Utc),
+            "log line");
+
+        string json = SeewoOpt.Services.CrashReporter.Serialize(payload);
+
+        Check("上报内容：包含 schema", json.Contains("\"schema\":1"), json);
+        Check("上报内容：包含事件名", json.Contains("\"event\":\"sync_failed\""), json);
+        Check("上报内容：时间为 UTC", json.Contains("2026-10-24T10:00:00Z"), json);
+        Check("上报内容：包含匿名设备标识", json.Contains("\"device\":\"abc123\""), json);
+        Check("上报内容：detail 已脱敏", !json.Contains("10.0.0.8"), json);
+        Check("上报内容：不含明文用户名",
+            Environment.UserName.Length < 3 || !json.Contains(Environment.UserName), json);
+    }
+
+    /// <summary>
+    /// 节流：崩溃往往成串出现，不限流会把端点打满；
+    /// 但不同事件之间不该互相压制。
+    /// </summary>
+    private static void TestCrashReportThrottle()
+    {
+        var now = new DateTime(2026, 10, 24, 10, 0, 0, DateTimeKind.Utc);
+        SeewoOpt.Services.CrashReporter.ResetThrottleForTests();
+
+        Check("上报节流：首次允许",
+            SeewoOpt.Services.CrashReporter.ShouldSend("sync_failed", now));
+
+        Check("上报节流：10 分钟内重复被拒",
+            !SeewoOpt.Services.CrashReporter.ShouldSend("sync_failed", now.AddMinutes(5)));
+
+        Check("上报节流：超过 10 分钟允许",
+            SeewoOpt.Services.CrashReporter.ShouldSend("sync_failed", now.AddMinutes(11)));
+
+        Check("上报节流：不同事件互不影响",
+            SeewoOpt.Services.CrashReporter.ShouldSend("update_failed", now.AddMinutes(11)));
+
+        SeewoOpt.Services.CrashReporter.ResetThrottleForTests();
+        bool firstEight = true;
+        for (int i = 0; i < 8; i++)
+            firstEight &= SeewoOpt.Services.CrashReporter.ShouldSend("event" + i, now);
+
+        Check("上报节流：单次运行最多 8 条",
+            firstEight && !SeewoOpt.Services.CrashReporter.ShouldSend("event8", now));
+
+        SeewoOpt.Services.CrashReporter.ResetThrottleForTests();
     }
 
     /// <summary>构造候选版本的辅助。</summary>

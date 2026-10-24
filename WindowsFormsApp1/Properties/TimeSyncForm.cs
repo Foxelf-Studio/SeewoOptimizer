@@ -145,6 +145,12 @@ namespace SeewoOpt
         private bool _autoVolume = false;
         private bool _killWps = false;
 
+        /// <summary>首次运行时要提示一次"已启用失败上报"</summary>
+        private bool _crashReportNoticePending;
+
+        /// <summary>任务失败时是否自动上报日志（默认开，用户可关）</summary>
+        private bool _crashReport = true;
+
         /// <summary>启动时是否自动开始执行既定任务（需求 1）</summary>
         private bool _autoStartTask = false;
 
@@ -207,6 +213,13 @@ namespace SeewoOpt
         {
             get { return _killWps; }
             set { _killWps = value; }
+        }
+
+        /// <summary>任务失败时是否自动上报日志</summary>
+        public bool CrashReport
+        {
+            get { return _crashReport; }
+            set { _crashReport = value; }
         }
 
         /// <summary>启动时是否自动开始执行既定任务</summary>
@@ -665,6 +678,13 @@ namespace SeewoOpt
                         $"Yeah, 检测到新版本 {Program.PendingUpdateInfo.Item1}，{Program.PendingUpdateInfo.Item2}",
                         ToolTipIcon.Info);
                     Program.PendingUpdateInfo = null;
+                }
+
+                if (_crashReportNoticePending)
+                {
+                    _crashReportNoticePending = false;
+                    AddLog("任务失败时会自动上报日志与设备信息（已脱敏，不含姓名/IP），可在设置中关闭。\n",
+                           Color.DimGray);
                 }
 
                 // 更新脚本替换完文件后会把本程序重新拉起（带 --restart）。
@@ -1767,6 +1787,11 @@ namespace SeewoOpt
                         AddLog("× 同步失败\n", Color.Red);
                         AddLog($"\n（悲报！） 经过 {NtpServers.Length} 个服务器的尝试后，时间同步失败。\n", Color.DarkRed);
 
+                        // 全部服务器都失败，说明问题可能不在单台服务器——
+                        // 把当时的日志尾巴发回去，比等用户描述"同步不了"有用得多。
+                        CrashReporter.Report("sync_failed",
+                            $"经过 {NtpServers.Length} 个服务器尝试后同步失败");
+
                         // 【行为变更】原实现在这里等 5 秒后关闭窗口退出程序。
                         // 现在程序要常驻守着关机时间点，所以失败也不退出——
                         // 只把界面恢复成"可以重试"的状态，让用户自己决定。
@@ -1780,6 +1805,7 @@ namespace SeewoOpt
                 catch (Exception ex)
                 {
                     WriteLog($"同步线程异常：{ex}");
+                    CrashReporter.Report("sync_exception", ex.ToString());
                     try
                     {
                         UpdateStatus($"错误: {ex.Message}", Color.Red);
@@ -2008,6 +2034,28 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
             _autoVolume = settings.AutoVolume;
             _volumeLevel = settings.VolumeLevel;
             _killWps = settings.KillWps;
+            _crashReport = settings.CrashReport;
+
+            // 设备标识：首次运行生成一次，之后一直沿用。
+            // 与硬件无关（不是 MachineGuid），重装即变——只需要"是不是同一台"，
+            // 不需要跨重装追踪。
+            if (string.IsNullOrEmpty(settings.DeviceId))
+            {
+                string newId = Guid.NewGuid().ToString("N");
+                settings.DeviceId = newId;
+                SettingsStore.Update(s =>
+                {
+                    if (string.IsNullOrEmpty(s.DeviceId)) s.DeviceId = newId;
+                });
+
+                // 默认开启就要说明白：只在真正首次生成标识时说一次。
+                // 这里只置标记，真正的文案留给 Load 事件——构造函数阶段
+                // 日志控件可能还没有句柄，直接 AppendText 有风险。
+                _crashReportNoticePending = true;
+            }
+
+            CrashReporter.DeviceId = settings.DeviceId;
+            CrashReporter.Enabled = _crashReport;
             _autoStartTask = settings.AutoStartTask;
             _firstRunDate = settings.FirstRunDate;
             _shutdownRules = settings.ShutdownRules ?? new List<ShutdownTimeRule>();
@@ -2079,11 +2127,15 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
                     s.AutoVolume = _autoVolume;
                     s.VolumeLevel = _volumeLevel;
                     s.KillWps = _killWps;
+                    s.CrashReport = _crashReport;
                     s.AutoStartTask = _autoStartTask;
                     s.ShutdownRules = _shutdownRules;
                     if (s.FirstRunDate == DateTime.MinValue)
                         s.FirstRunDate = _firstRunDate;
                 });
+
+                // 设置窗体关掉开关后要立刻生效，否则本次运行仍会上报
+                CrashReporter.Enabled = _crashReport;
 
                 UpdateAutoStartTask();
 
