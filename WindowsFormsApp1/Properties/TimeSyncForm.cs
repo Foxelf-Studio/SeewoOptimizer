@@ -1486,13 +1486,53 @@ namespace SeewoOpt
                 return;
             }
 
-            this.Show();
+            // 【先改状态再 Show】静默启动时窗口是被"最小化 + 隐藏"的，
+            // 先 Show 再设 Normal 会走一遍"最小化窗口被恢复"的流程：
+            // 任务栏按钮闪一下，且 RichTextBox 在这种恢复后经常整块不重绘。
             this.WindowState = FormWindowState.Normal;
+            this.Show();
             this.Activate();
+            this.BringToFront();
             showConsoleButton.Visible = false;
 
             if (trayIcon != null)
                 trayIcon.Visible = false;
+
+            ForceLogRepaint();
+        }
+
+        /// <summary>
+        /// 从托盘恢复窗口后，强制日志区重绘。
+        ///
+        /// 【为什么必须做】静默启动时窗口从未显示过，日志是趁它不可见时
+        /// 一条条 AppendText 进去的。RichTextBox 对"隐藏期间累积的内容"
+        /// 不会自动重画——实机表现就是日志区一片空白，右侧滚动条却在底部，
+        /// 滚一下滚轮才刷出来。内容一直都在，缺的只是一次重绘。
+        ///
+        /// Invalidate(true) 连子控件一起标脏，Update() 立刻处理 WM_PAINT，
+        /// 中间不经过消息循环，用户看不到闪烁。
+        /// </summary>
+        private void ForceLogRepaint()
+        {
+            try
+            {
+                if (IsDisposed) return;
+
+                Invalidate(true);
+                Update();
+
+                if (logTextBox != null && !logTextBox.IsDisposed)
+                {
+                    // 插入点归位：否则光标可能停在隐藏前的旧位置，
+                    // 滚动条看着在底部、实际视图却停在中间。
+                    logTextBox.SelectionStart = logTextBox.TextLength;
+                    logTextBox.ScrollToCaret();
+                }
+            }
+            catch
+            {
+                // 重绘失败不该影响"显示窗口"这个动作本身
+            }
         }
 
         private void ExitProgram()
