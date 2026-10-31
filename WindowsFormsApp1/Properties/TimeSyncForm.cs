@@ -328,25 +328,39 @@ namespace SeewoOpt
             {
                 WriteLog("构造函数开始");
 
-                // 订阅更新检测事件，用于显示气泡提示
+                // 订阅更新检测事件：气泡 + 日志区各说一遍。
+                //
+                // 【为什么要写进日志区】窗口开着的时候，右下角的系统通知
+                // 经常被教室大屏关掉或忽略；日志区是他正盯着的地方。
                 Program.UpdateDetected += (version, message) =>
                 {
-                    if (trayIcon != null && !this.IsDisposed)
+                    if (this.IsDisposed) return;
+
+                    Action show = () =>
                     {
-                        // 确保在 UI 线程上操作
-                        if (this.InvokeRequired)
+                        if (this.IsDisposed) return;
+
+                        AddLog($"检测到新版本 {version}，{message}\n", Color.DarkCyan);
+
+                        if (trayIcon != null)
                         {
-                            this.Invoke(new MethodInvoker(() =>
-                            {
-                                trayIcon.ShowBalloonTip(5000, "软件更新", $"Yeah, 检测到新版本 {version}，{message}", ToolTipIcon.Info);
-                            }));
+                            trayIcon.ShowBalloonTip(5000, "软件更新",
+                                $"Yeah, 检测到新版本 {version}，{message}", ToolTipIcon.Info);
                         }
-                        else
-                        {
-                            trayIcon.ShowBalloonTip(5000, "软件更新", $"Yeah, 检测到新版本 {version}，{message}", ToolTipIcon.Info);
-                        }
+                    };
+
+                    try
+                    {
+                        // 用 BeginInvoke：退出时 UI 线程可能正卡在 Join 上，
+                        // 同步 Invoke 会把双方锁死（见 WaitForBackgroundWork 注释）。
+                        if (this.InvokeRequired) this.BeginInvoke(show);
+                        else show();
                     }
+                    catch { }
                 };
+
+                // 下载进度：每跨 10% 写一行，和文件日志保持一致
+                Program.UpdateProgress += OnUpdateProgress;
 
                 // 从当前 exe 文件加载图标作为窗体图标（任务栏图标）
                 this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
@@ -689,6 +703,11 @@ namespace SeewoOpt
 
                 if (Program.PendingUpdateInfo != null && trayIcon != null)
                 {
+                    // 检测发生在窗体订阅事件之前（更新检查是先于窗体启动的），
+                    // 这种情况由这里补一句日志，否则日志区会漏掉"发现新版本"。
+                    AddLog($"检测到新版本 {Program.PendingUpdateInfo.Item1}，{Program.PendingUpdateInfo.Item2}\n",
+                           Color.DarkCyan);
+
                     trayIcon.ShowBalloonTip(5000, "软件更新",
                         $"Yeah, 检测到新版本 {Program.PendingUpdateInfo.Item1}，{Program.PendingUpdateInfo.Item2}",
                         ToolTipIcon.Info);
@@ -1546,6 +1565,33 @@ namespace SeewoOpt
                 if (!trayIcon.Visible) trayIcon.Visible = true;
             }
             catch { }
+        }
+
+        /// <summary>
+        /// 把更新下载进度写进日志区。
+        ///
+        /// 触发方在后台线程（WebClient 的回调），这里负责编组到 UI 线程。
+        /// 用 BeginInvoke 而不是 Invoke：退出时 UI 线程可能正卡在 Join 上，
+        /// 同步等待会把两边锁死。
+        /// </summary>
+        private void OnUpdateProgress(int percent)
+        {
+            try
+            {
+                if (this.IsDisposed) return;
+
+                if (this.InvokeRequired)
+                {
+                    this.BeginInvoke(new Action<int>(OnUpdateProgress), percent);
+                    return;
+                }
+
+                AddLog($"更新下载进度: {percent}%\n", Color.DarkCyan);
+            }
+            catch
+            {
+                // 界面已经销毁时投递会失败，忽略即可
+            }
         }
 
         /// <summary>

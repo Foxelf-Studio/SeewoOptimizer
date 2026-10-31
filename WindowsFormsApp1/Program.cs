@@ -83,6 +83,16 @@ namespace SeewoOpt
         // 更新检测事件（用于通知 TimeSyncForm 显示气泡）
         public static event Action<string, string> UpdateDetected;
 
+        /// <summary>
+        /// 更新下载进度（0-100），供界面日志区显示。
+        ///
+        /// 【为什么单独一个事件】下载跑在后台线程，界面要把进度写进日志区
+        /// 就必须跨线程；事件在 Program 里触发、由窗体自己编组到 UI 线程，
+        /// 比让 Program 持有窗体引用干净。只在跨过 10% 时触发，
+        /// 否则每 1% 一条，日志区会被刷爆。
+        /// </summary>
+        public static event Action<int> UpdateProgress;
+
         // 缓存更新信息，防止事件错过
         public static Tuple<string, string> PendingUpdateInfo { get; set; }
 
@@ -840,7 +850,12 @@ namespace SeewoOpt
                     try
                     {
                         if (e.ProgressPercentage % 10 == 0)
+                        {
                             WriteLog($"下载进度: {e.ProgressPercentage}%");
+                            // 同步给界面日志区：用户在窗口前等着，
+                            // 只写进文件等于没告诉他。
+                            UpdateProgress?.Invoke(e.ProgressPercentage);
+                        }
                     }
                     catch { }
                 };
