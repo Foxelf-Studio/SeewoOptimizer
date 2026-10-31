@@ -1053,8 +1053,15 @@ namespace SeewoOpt
             //
             // 所以改为把值直接写进脚本本身，一个机制解决两个问题。
             // 代价是必须自己处理批处理转义（见 UpdateScriptLauncher.EscapeForBatch）。
-            File.WriteAllText(scriptPath, batchContent);
-            WriteLog($"更新脚本已创建: {scriptPath}");
+            // 【编码必须是系统 ANSI，不能用 WriteAllText 的默认 UTF-8】
+            // cmd.exe 按 OEM 代码页（简中 Windows 是 936）读取批处理文件。
+            // 用 UTF-8（无 BOM）写，脚本里的中文路径会原样变成乱码：
+            //   F:\陈叔叔希沃优化助手\ → F:\闄堝彅鍙斿笇娌冧紭鍖栧姪鎵媆
+            // 于是 copy/start 全部指向不存在的路径，更新静默失败，
+            // 进程退出后也没有被重新拉起——守护就断了。
+            // 2026-10-31 在含中文的目录下实测复现。
+            File.WriteAllText(scriptPath, batchContent, Encoding.Default);
+            WriteLog($"更新脚本已创建: {scriptPath}（编码 {Encoding.Default.WebName}）");
 
             // 构造启动参数。为什么必须是 "UseShellExecute = false + 经 cmd.exe 启动"、
             // 为什么 cmd.exe 要用绝对路径，全部写在 UpdateScriptLauncher 的注释里。
