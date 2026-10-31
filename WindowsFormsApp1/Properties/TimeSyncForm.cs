@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 using SeewoOpt.Services;
@@ -1358,6 +1359,20 @@ namespace SeewoOpt
         private const int WM_ENDSESSION = 0x0016;
 
         /// <summary>
+        /// 资源管理器重启后由外壳广播的消息。
+        ///
+        /// 【为什么必须处理】托盘图标是注册在 explorer 里的，explorer 崩溃或
+        /// 被重启后，所有图标都会消失，而进程照常在跑——用户看到的就是
+        /// "程序从托盘里没了，但任务管理器里还活着"。这是托盘程序最常见的
+        /// 一类"概率性消失"，跟程序自己的逻辑无关。
+        /// 收到这个广播后重新设置 Visible，图标就回来了。
+        /// </summary>
+        private static readonly int WM_TASKBARCREATED = (int)RegisterWindowMessage("TaskbarCreated");
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern uint RegisterWindowMessage(string lpString);
+
+        /// <summary>
         /// 拦系统会话消息：全程记日志，并在会话真正结束时主动退出。
         ///
         /// 【为什么同意关机还不够，必须处理 WM_ENDSESSION】
@@ -1384,6 +1399,13 @@ namespace SeewoOpt
         /// </summary>
         protected override void WndProc(ref Message m)
         {
+            // 资源管理器重启：托盘图标全没了，进程却还在。
+            // 这个广播是唯一的补救信号，收到就重新挂上。
+            if (m.Msg == WM_TASKBARCREATED)
+            {
+                RestoreTrayIcon();
+            }
+
             if (m.Msg == WM_QUERYENDSESSION || m.Msg == WM_ENDSESSION)
             {
                 WriteLog($"收到系统会话消息 0x{m.Msg:X4}（wParam={m.WParam}）");
@@ -1495,10 +1517,46 @@ namespace SeewoOpt
             this.BringToFront();
             showConsoleButton.Visible = false;
 
-            if (trayIcon != null)
-                trayIcon.Visible = false;
+            // 【托盘图标不跟着窗口走】原来这里把 Visible 置成 false，
+            // 窗口一打开图标就从托盘消失。后果是实机发生过的：
+            // 用户开着窗口去托盘找图标想退出，找不到，以为程序只剩进程，
+            // 只能去任务管理器。图标在窗口打开时也留着，双击能回到窗口，
+            // 右键随时能退出——这才是托盘程序该有的样子。
+            EnsureTrayIconVisible();
 
             ForceLogRepaint();
+        }
+
+        /// <summary>确保托盘图标挂着（不改变窗口状态）。</summary>
+        private void EnsureTrayIconVisible()
+        {
+            try
+            {
+                if (trayIcon == null || IsDisposed) return;
+                if (!trayIcon.Visible) trayIcon.Visible = true;
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 资源管理器重启后把托盘图标挂回来。
+        ///
+        /// 图标是注册在 explorer 里的，explorer 一重启就全没了，
+        /// 进程本身毫发无伤——于是出现"托盘里没了、任务管理器里还在"。
+        /// </summary>
+        private void RestoreTrayIcon()
+        {
+            try
+            {
+                if (trayIcon == null || IsDisposed) return;
+
+                trayIcon.Visible = true;
+                WriteLog("收到 TaskbarCreated（资源管理器重启），已重新挂载托盘图标");
+            }
+            catch (Exception ex)
+            {
+                WriteLog("重新挂载托盘图标失败：" + ex.Message);
+            }
         }
 
         /// <summary>
