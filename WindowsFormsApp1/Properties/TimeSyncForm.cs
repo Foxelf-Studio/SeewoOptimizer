@@ -1271,10 +1271,20 @@ namespace SeewoOpt
                 Icon = trayIconIcon ?? SystemIcons.Information,
                 Text = "川中计算机协会-陈叔叔希沃优化助手",
                 ContextMenuStrip = trayMenu,
-                Visible = false
+
+                // 【启动即驻留】原来这里是 false，图标要等"隐藏到托盘"或
+                // "点 × 缩托盘"之后才出现。结果就是：窗口开着的时候，
+                // 用户在托盘里找不到它，只能去任务管理器确认进程还在。
+                // 常驻托盘的程序应当一启动就挂着图标——双击回窗口，
+                // 右键随时退出，与窗口显示与否无关。
+                Visible = true
             };
 
             trayIcon.DoubleClick += (s, e) => ShowMainWindow();
+
+            // 留一条日志：以后再有"托盘里找不到图标"的反馈，
+            // 先看这行在不在，就能区分"没创建"和"创建了但被外壳弄丢"。
+            WriteLog("托盘图标已创建，启动即驻留");
         }
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
