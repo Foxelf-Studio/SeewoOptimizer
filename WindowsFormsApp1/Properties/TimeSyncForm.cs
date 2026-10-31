@@ -19,6 +19,20 @@ namespace SeewoOpt
         private Thread syncThread;
 
         /// <summary>
+        /// "已驻留托盘"这条提示，本次运行是否已经弹过。
+        ///
+        /// 【为什么需要】静默启动时用户看到同一条右下角通知出现了两次。
+        /// 两个原因叠在一起：
+        ///   1. <see cref="MinimizeToTray"/> 每调用一次就弹一次，而它不止一个
+        ///      入口（启动静默分支、点 × 、点"隐藏到托盘"）；
+        ///   2. 气泡是在 `trayIcon.Visible = true` 的同一轮消息里弹的，
+        ///      此时外壳还没登记完这个图标，请求会被重新排队。
+        /// 这里对应两道保险：一次运行只提示一次，且推迟到下一轮消息循环再弹。
+        /// 手动点"隐藏到托盘"时不提示也不算缺陷——窗口消失本身就是反馈。
+        /// </summary>
+        private bool _trayBalloonShown;
+
+        /// <summary>
         /// 当前存活的窗体实例，供 <see cref="WaitForBackgroundWork"/> 找到同步线程。
         ///
         /// 【为什么需要它】同步线程是窗体的私有字段，而"写日志结束标记"发生在
@@ -1412,11 +1426,54 @@ namespace SeewoOpt
             if (trayIcon != null)
             {
                 trayIcon.Visible = true;
-                // 【文案变更】原来说"不必关闭"——那是"同步完就退出"时代的说法。
-                // 现在程序是长期常驻的，用户有权知道它一直在这里。
-                trayIcon.ShowBalloonTip(3000, "陈叔叔希沃优化助手",
-                    "程序已驻留托盘，将持续守候关机时间点。右键图标可立即同步或退出。",
-                    ToolTipIcon.Info);
+
+                // 【只提示一次】这条通知是给"窗口根本没出现过"的静默启动用的，
+                // 用户需要知道程序还活着。之后再缩托盘是用户主动点的，
+                // 窗口消失本身就是反馈，反复弹只是噪音。
+                if (!_trayBalloonShown)
+                {
+                    // 只有真正投递出去才算"已提示"；句柄还没建好时保持 false，
+                    // 下一次调用还有机会弹出来，不会因为一次失败就永远静音。
+                    if (ShowResidentBalloon()) _trayBalloonShown = true;
+                }
+                else
+                {
+                    WriteLog("托盘提示本次运行已展示过，跳过");
+                }
+            }
+        }
+
+        /// <summary>
+        /// 弹一次"已驻留托盘"气泡。
+        ///
+        /// 【为什么要推迟到下一轮消息循环】调用点刚把
+        /// `trayIcon.Visible` 置为 true，外壳（explorer）还没完成图标登记。
+        /// 在同一轮消息里立刻 ShowBalloonTip，请求会被重新排队，
+        /// 用户就会看到两条一样的通知——这正是实机反馈的现象。
+        /// BeginInvoke 投递到消息队列尾部，等这一轮处理完再弹。
+        /// </summary>
+        private bool ShowResidentBalloon()
+        {
+            try
+            {
+                if (!IsHandleCreated || IsDisposed) return false;
+
+                BeginInvoke(new MethodInvoker(() =>
+                {
+                    if (trayIcon == null || IsDisposed) return;
+
+                    // 【文案变更】原来说"不必关闭"——那是"同步完就退出"时代的说法。
+                    // 现在程序是长期常驻的，用户有权知道它一直在这里。
+                    trayIcon.ShowBalloonTip(3000, "陈叔叔希沃优化助手",
+                        "程序已驻留托盘，将持续守候关机时间点。右键图标可立即同步或退出。",
+                        ToolTipIcon.Info);
+                }));
+                return true;
+            }
+            catch
+            {
+                // 消息循环已停止（正在退出）时投递会失败：那种时候本来也不该弹气泡
+                return false;
             }
         }
 
