@@ -158,7 +158,6 @@ namespace SeewoOpt
         private bool _silentStart = false;
         private int _volumeLevel = 50;
         private bool _autoVolume = false;
-        private bool _killWps = false;
 
         /// <summary>首次运行时要提示一次"已启用失败上报"</summary>
         private bool _crashReportNoticePending;
@@ -222,12 +221,6 @@ namespace SeewoOpt
         {
             get { return _autoVolume; }
             set { _autoVolume = value; }
-        }
-
-        public bool KillWps
-        {
-            get { return _killWps; }
-            set { _killWps = value; }
         }
 
         /// <summary>任务失败时是否自动上报日志</summary>
@@ -771,7 +764,7 @@ namespace SeewoOpt
                     logTextBox.AppendText($"PEACE & LOVE 川中计算机协会 陈叔叔希沃优化助手 ver.{_versionString}\n");
                     logTextBox.AppendText(new string('-', 50) + "\n");
                     logTextBox.AppendText("陈叔叔已在此守候。\n");
-                    logTextBox.AppendText("点击左下角「开始执行」按钮，即可开始音量调节、结束 WPS 进程与时间同步。\n");
+                    logTextBox.AppendText("点击左下角「开始执行」按钮，即可开始音量调节与时间同步。\n");
                 }
 
                 WriteLog("Load 事件完成");
@@ -1774,44 +1767,6 @@ namespace SeewoOpt
                         AddLog("音量调节已禁用，跳过\n", Color.Gray);
                     }
 
-                    if (KillWps)
-                    {
-                        WriteLog("开始结束WPS进程");
-                        UpdateStatus("正在结束WPS进程...", Color.DarkBlue);
-                        AddLog("\n正在结束WPS相关进程... ", Color.Black);
-
-                        // ProcessCleaner 逐个回调进度，界面只负责显示
-                        int killedCount = ProcessCleaner.KillWpsProcesses(r =>
-                        {
-                            if (r.ProcessId == 0)
-                            {
-                                AddLog($"× {r.ProcessName}: {r.Message}\n", Color.Red);
-                            }
-                            else
-                            {
-                                AddLog($"结束进程: {r.ProcessName} (ID: {r.ProcessId})... ", Color.DarkGray);
-                                AddLog(r.Success ? "√ 成功\n" : $"× {r.Message}\n",
-                                       r.Success ? Color.Green : Color.Red);
-                            }
-                        });
-
-                        if (killedCount > 0)
-                        {
-                            AddLog($"√ 完成 (已结束 {killedCount} 个WPS进程)\n", Color.Green);
-                            AddLog("WPS进程已结束，继续进行时间同步\n", Color.DarkGreen);
-                        }
-                        else
-                        {
-                            AddLog($"√ 完成 (未发现WPS进程)\n", Color.Green);
-                            AddLog("未发现WPS进程，继续进行时间同步\n", Color.DarkGreen);
-                        }
-                        WriteLog("结束WPS进程完成");
-                    }
-                    else
-                    {
-                        AddLog("\n跳过结束WPS进程（用户设置）\n", Color.Gray);
-                    }
-
                     bool success = false;
                     bool adminPermissionError = false;
 
@@ -2244,8 +2199,7 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
             _silentStart = settings.SilentStart;
             _autoVolume = settings.AutoVolume;
             _volumeLevel = settings.VolumeLevel;
-            _killWps = settings.KillWps;
-            _crashReport = settings.CrashReport;
+                        _crashReport = settings.CrashReport;
 
             // 设备标识：首次运行生成一次，之后一直沿用。
             // 与硬件无关（不是 MachineGuid），重装即变——只需要"是不是同一台"，
@@ -2337,8 +2291,7 @@ private static bool SyncTimeWithServer(string ntpServer, ref bool adminPermissio
                     s.SilentStart = _silentStart;
                     s.AutoVolume = _autoVolume;
                     s.VolumeLevel = _volumeLevel;
-                    s.KillWps = _killWps;
-                    s.CrashReport = _crashReport;
+                                        s.CrashReport = _crashReport;
                     s.AutoStartTask = _autoStartTask;
                     s.ShutdownRules = _shutdownRules;
                     if (s.FirstRunDate == DateTime.MinValue)

@@ -108,7 +108,7 @@ internal static class NtpClientTests
 
         // --- 设置规整（注册表可手改，界面限不住）---
         TestSettingsNormalizeClampsRuleCount();
-        TestDefaultSettingsKeepWpsProcessesAlive();
+        TestDefaultSettingsAreConservative();
 
         // --- 签名信任链（换钥过渡）---
         TestSignatureVerifierAcceptsSecondKey();
@@ -2303,17 +2303,16 @@ internal static class NtpClientTests
     }
 
     /// <summary>
-    /// 全新安装的默认值：结束 WPS 进程必须是关的。
+    /// 全新安装的默认值。
     ///
-    /// 这条不是“偏好”，是安全边界：杀掉 WPS 会连带杀掉用户正在编辑的文档。
-    /// 默认勾选等于替用户决定，而用户往往直到丢掉一份没保存的课件才发现。
-    /// 老用户已写入注册表的值不受影响，这里只管 CreateDefault。
+    /// 启动时不替用户自动执行、开机自启默认打开——前者是“别自作主张”，
+    /// 后者是“装它就是为了让它守着”。老用户已写入注册表的值不受影响，
+    /// 这里只管 CreateDefault。
     /// </summary>
-    private static void TestDefaultSettingsKeepWpsProcessesAlive()
+    private static void TestDefaultSettingsAreConservative()
     {
         var s = SeewoOpt.Services.AppSettings.CreateDefault();
 
-        Check("默认设置：不自动结束 WPS 进程", !s.KillWps, $"得到 {s.KillWps}");
         Check("默认设置：不自动执行既定任务", !s.AutoStartTask, $"得到 {s.AutoStartTask}");
         Check("默认设置：开机自启仍为开", s.AutoStart, $"得到 {s.AutoStart}");
     }

@@ -30,7 +30,6 @@ namespace SeewoOpt
         private CheckBox chkAutoStartTask;
         private CheckBox chkAutoVolume;
         private NumericUpDown numVolumeLevel;
-        private CheckBox chkKillWps;
         private CheckBox chkCrashReport;
 
         // --- 下半部分：关机时间点 ---
@@ -95,7 +94,7 @@ namespace SeewoOpt
             {
                 Text = "常规",
                 Location = new Point(12, 10),
-                Size = new Size(536, 176)
+                Size = new Size(536, 152)
             };
 
             chkAutoStart = NewCheckBox("开机自启动", new Point(16, 26));
@@ -115,9 +114,7 @@ namespace SeewoOpt
                 Value = 60
             };
 
-            chkKillWps = NewCheckBox("自动执行结束 WPS 进程任务", new Point(16, 122));
-
-            chkCrashReport = NewCheckBox("任务失败时自动上报日志（不含个人信息）", new Point(16, 146));
+            chkCrashReport = NewCheckBox("任务失败时自动上报日志（不含个人信息）", new Point(16, 122));
 
             // 没配上报端点时，这个开关点与不点都没区别——干脆不显示，
             // 而不是给用户一个不起作用的选项。
@@ -128,7 +125,6 @@ namespace SeewoOpt
             optionGroup.Controls.Add(chkAutoStartTask);
             optionGroup.Controls.Add(chkAutoVolume);
             optionGroup.Controls.Add(numVolumeLevel);
-            optionGroup.Controls.Add(chkKillWps);
             optionGroup.Controls.Add(chkCrashReport);
             this.Controls.Add(optionGroup);
 
@@ -423,7 +419,6 @@ namespace SeewoOpt
             chkAutoStartTask.Checked = parentForm.AutoStartTask;
             chkAutoVolume.Checked = parentForm.AutoVolume;
             numVolumeLevel.Value = Clamp(parentForm.VolumeLevel, 0, 100);
-            chkKillWps.Checked = parentForm.KillWps;
             chkCrashReport.Checked = parentForm.CrashReport;
 
             // 装载现有规则。用副本——若用户的编辑被取消，
@@ -494,7 +489,6 @@ namespace SeewoOpt
             parentForm.AutoStartTask = chkAutoStartTask.Checked;
             parentForm.AutoVolume = chkAutoVolume.Checked;
             parentForm.VolumeLevel = (int)numVolumeLevel.Value;
-            parentForm.KillWps = chkKillWps.Checked;
             parentForm.CrashReport = chkCrashReport.Checked;
             parentForm.ShutdownRules = rules;
 

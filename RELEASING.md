@@ -68,8 +68,8 @@ CI 在推送 `v*` 标签时会：
 **本次更新**
 
 - 设置窗口与主窗口图标统一
-- WPS 进程默认不再自动结束
-- 更新完成后自动重新打开程序
+- 托盘图标启动即驻留
+- 恢复窗口后日志不再空白
 
 [查看详细更新日志 →](https://github.com/Foxelf-Studio/SeewoOptimizer/blob/master/docs/changelog/vX.Y.Z.md)
 

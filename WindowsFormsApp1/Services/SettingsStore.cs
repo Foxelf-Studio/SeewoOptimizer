@@ -23,9 +23,6 @@ namespace SeewoOpt.Services
         /// <summary>目标音量百分比（0-100）</summary>
         public int VolumeLevel { get; set; }
 
-        /// <summary>是否在启动时结束 WPS 相关进程</summary>
-        public bool KillWps { get; set; }
-
         /// <summary>
         /// 任务失败时是否自动上报日志与设备基本信息。
         ///
@@ -104,11 +101,6 @@ namespace SeewoOpt.Services
                 SilentStart = false,
                 AutoVolume = true,
                 VolumeLevel = 60,
-                // 结束 WPS 进程默认关闭。
-                // 这个动作会直接杀掉用户正在编辑的文档，全新安装不该默认替人
-                // 做决定；需要的人在设置里勾上。已存过设置的老用户按注册表原值走，
-                // 不会被这条默认值改动。
-                KillWps = false,
                 // 失败上报默认开启：没有日志的故障反馈基本等于没有反馈。
                 // 代价是用户可关、内容脱敏、只报失败（见属性注释）。
                 CrashReport = true,
@@ -260,7 +252,6 @@ namespace SeewoOpt.Services
                         settings.SilentStart = ReadBool(key, "SilentStart", settings.SilentStart);
                         settings.AutoVolume = ReadBool(key, "AutoVolume", settings.AutoVolume);
                         settings.VolumeLevel = ReadInt(key, "VolumeLevel", settings.VolumeLevel);
-                        settings.KillWps = ReadBool(key, "KillWps", settings.KillWps);
                         settings.CrashReport = ReadBool(key, "CrashReport", settings.CrashReport);
                         settings.DeviceId = ReadString(key, "DeviceId", settings.DeviceId);
                         settings.AutoStartTask = ReadBool(key, "AutoStartTask", settings.AutoStartTask);
@@ -302,7 +293,6 @@ namespace SeewoOpt.Services
                         key.SetValue("SilentStart", settings.SilentStart);
                         key.SetValue("AutoVolume", settings.AutoVolume);
                         key.SetValue("VolumeLevel", settings.VolumeLevel);
-                        key.SetValue("KillWps", settings.KillWps);
                         key.SetValue("CrashReport", settings.CrashReport);
                         if (!string.IsNullOrEmpty(settings.DeviceId))
                             key.SetValue("DeviceId", settings.DeviceId);
